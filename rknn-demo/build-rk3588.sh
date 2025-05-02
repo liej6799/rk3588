@@ -1,0 +1,1 @@
+./build-linux.sh -t rk3588 -a aarch64 -b Release
