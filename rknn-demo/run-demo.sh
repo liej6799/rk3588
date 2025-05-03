@@ -1,1 +1,1 @@
-LD_PRELOAD=./sniff.so ./install/rknn_api_demo_Linux/rknn_create_mem_demo model/RK3588/mobilenet_v1.rknn model/dog_224x224.jpg 10000000000
+ LD_LIBRARY_PATH="/root/.pyenv/versions/3.11.4/lib" LD_PRELOAD="/root/tinygrad/extra/rockchip/preload_python.so" ./install/rknn_api_demo_Linux/rknn_create_mem_demo model/RK3588/mobilenet_v1.rknn model/dog_224x224.jpg 1

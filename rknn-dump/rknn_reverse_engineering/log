@@ -1,0 +1,30 @@
+hello from c
+from import
+import done
+0 struct_drm_version ['version_major:0x0', 'version_minor:0x9', 'version_patchlevel:0x8', 'name_len:0x5', 'name:<tinygrad.runtime.autogen.libc.LP_c_ubyte object at 0xfe880dbdf2f0>', 'date_len:0x8', 'date:<tinygrad.runtime.autogen.libc.LP_c_ubyte object at 0xfe880dbdf2f0>', 'desc_len:0xC', 'desc:<tinygrad.runtime.autogen.libc.LP_c_ubyte object at 0xfe880dbdf2f0>']
+drm name is rknpu - 20240828 - RKNPU driver
+0 struct_rknpu_mem_create ['handle:0x1', 'flags:0x0', 'size:0x1000', 'obj_addr:0xFFFF0002F4E4B800', 'dma_addr:0xFFFFA000', 'sram_size:0x0']
+0 struct_rknpu_mem_map ['handle:0x1', 'reserved:0x0', 'offset:0x100000000']
+0 struct_rknpu_mem_create ['handle:0x2', 'flags:0x8', 'size:0x1000', 'obj_addr:0xFFFF0002F4E48C00', 'dma_addr:0xFFFF9000', 'sram_size:0x0']
+0 struct_rknpu_mem_map ['handle:0x2', 'reserved:0x0', 'offset:0x100001000']
+0 struct_rknpu_mem_create ['handle:0x3', 'flags:0x0', 'size:0x1000', 'obj_addr:0xFFFF0002F4E4DC00', 'dma_addr:0xFFFF8000', 'sram_size:0x0']
+0 struct_rknpu_mem_map ['handle:0x3', 'reserved:0x0', 'offset:0x100002000']
+0 struct_rknpu_mem_create ['handle:0x4', 'flags:0x0', 'size:0x1000', 'obj_addr:0xFFFF0002F4E49000', 'dma_addr:0xFFFF7000', 'sram_size:0x0']
+0 struct_rknpu_mem_map ['handle:0x4', 'reserved:0x0', 'offset:0x100003000']
+0 struct_rknpu_mem_create ['handle:0x5', 'flags:0x0', 'size:0x1000', 'obj_addr:0xFFFF0002F4E4A800', 'dma_addr:0xFFFF6000', 'sram_size:0x0']
+0 struct_rknpu_mem_map ['handle:0x5', 'reserved:0x0', 'offset:0x100004000']
+input dma is ffff8000, output dma is ffff6000, weights dma is ffff7000
+0 struct_rknpu_action ['flags:0x6', 'value:0x0']
+0 struct_rknpu_submit ['flags:0x5', 'timeout:0x1770', 'task_start:0x0', 'task_number:0x1', 'task_counter:0x1', 'priority:0x0', 'task_obj_addr:0xFFFF0002F4E48C00', 'regcfg_obj_addr:0x0', 'task_base_addr:0x0', 'user_data:0x3FCD', 'core_mask:0x1', 'fence_fd:0x-1', 'subcore_task:<tinygrad.runtime.autogen.rockchip.struct_rknpu_subcore_task_Array_5 object at 0xfe880dbdf9b0>']
+RKNPU_SUBMIT returned 0
+=========================================================================================================
+1224.0 1023.0 1158.0 1259.0 1359.0 1194.0 1535.0 1247.0 1185.0 1029.0  889.0 1182.0  955.0 1179.0 1147.0
+1216.0 1087.0 1239.0 1361.0 1392.0 1260.0 1247.0 1563.0 1167.0 1052.0  942.0 1214.0 1045.0 1134.0 1264.0
+1125.0  966.0 1079.0 1333.0 1287.0 1101.0 1185.0 1167.0 1368.0  990.0  967.0 1121.0  971.0 1086.0 1130.0
+ 999.0  902.0 1020.0 1056.0 1076.0  929.0 1029.0 1052.0  990.0 1108.0  823.0  989.0  759.0 1041.0 1003.0
+=========================================================================================================
+0 struct_rknpu_mem_destroy ['handle:0x1', 'reserved:0x0', 'obj_addr:0xFFFF0002F4E4B800']
+0 struct_rknpu_mem_destroy ['handle:0x2', 'reserved:0x0', 'obj_addr:0xFFFF0002F4E48C00']
+0 struct_rknpu_mem_destroy ['handle:0x3', 'reserved:0x0', 'obj_addr:0xFFFF0002F4E4DC00']
+0 struct_rknpu_mem_destroy ['handle:0x4', 'reserved:0x0', 'obj_addr:0xFFFF0002F4E49000']
+0 struct_rknpu_mem_destroy ['handle:0x5', 'reserved:0x0', 'obj_addr:0xFFFF0002F4E4A800']

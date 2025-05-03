@@ -9,20 +9,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-shlib-undefined")
 
 # rknn api
-set(RKNN_API_PATH ${CMAKE_SOURCE_DIR}/runtime/${CMAKE_SYSTEM_NAME}/librknn_api)
-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
-  set(RKNN_RT_LIB ${RKNN_API_PATH}/${CMAKE_ANDROID_ARCH_ABI}/librknnrt.so)
-else()
-  if(CMAKE_C_COMPILER MATCHES "aarch64")
-    set(LIB_ARCH aarch64)
-  else()
-    set(LIB_ARCH armhf)
-  endif()
-
-  set(RKNN_RT_LIB ${RKNN_API_PATH}/${LIB_ARCH}/librknnrt.so)
-endif()
-
-include_directories(${RKNN_API_PATH}/include)
+set(RKNN_API_PATH ${CMAKE_SOURCE_DIR}/../rknn-header/)
+set(RKNN_RT_LIB ${RKNN_API_PATH}/librknnrt.so)
+include_directories(${RKNN_API_PATH})
 
 # stb
 include_directories(${CMAKE_SOURCE_DIR}/include/)
