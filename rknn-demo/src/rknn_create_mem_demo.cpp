@@ -16,6 +16,7 @@
                 Includes
 -------------------------------------------*/
 #include "rknn_api.h"
+#include "rknn_custom_op.h"
 
 #include <float.h>
 #include <stdio.h>
@@ -177,7 +178,7 @@ int main(int argc, char* argv[])
   }
   int            model_len = 0;
   unsigned char* model     = load_model(model_path, &model_len);
-  int            ret       = rknn_init(&ctx, model, model_len, 0, NULL);
+  int            ret       = rknn_init(&ctx, model_path, 0, 0, NULL);
   if (ret < 0) {
     printf("rknn_init fail! ret=%d\n", ret);
     return -1;

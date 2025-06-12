@@ -1,0 +1,8 @@
+import numpy
+
+n1 = numpy.load("model/dual_residual_input_0_nhwc.npy")
+n2 = numpy.load("dual_residual_input_0.npy")
+print(n1[0][0][0])
+print(n2[0])
+# 1.64746 1.27734 0.00316429 0.563965 -0.745117 0.272461 0.529297 -0.153198 1.45703 0.556641 -0.961426
+# 1.64746 0.00316429 -0.745117 0.529297 1.45703 -0.961426
