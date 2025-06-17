@@ -21,6 +21,7 @@
 #include <sys/time.h>
 #include <cmath>
 #include <cstring>
+#include <typeinfo>
 
 #include "rknn_api.h"
 #include "rknn_custom_op.h"
@@ -203,18 +204,55 @@ static unsigned char *load_npy(const char *input_path, rknn_tensor_attr *input_a
     break;
   }
 
-  unsigned char *data = (unsigned char *)malloc(npy_data.num_bytes());
-  if (!data)
-  {
-    return NULL;
-  }
+  printf("npy_data.num_bytes() %d", npy_data.num_bytes());
+  
 
-  // TODO: copy
-  memcpy(data, npy_data.data<unsigned char>(), npy_data.num_bytes());
+  // Dynamically allocate and initialize source array
 
-  *input_size = npy_data.num_bytes();
 
-  return data;
+  float* test = (float*)malloc(16777216 * sizeof(float));
+
+    for (size_t i = 0; i < 16777216; ++i) {
+        test[i] = 1.0f;
+    }
+
+    // Dynamically allocate destination buffer
+    float* data = (float*)malloc(16777216 * sizeof(float));
+
+    // Copy the data
+    //memcpy(data, test, 1048576 * sizeof(float)); // Does not hit SegFault
+    memcpy(data, test, 16777216 * sizeof(float)); // Hit SegFault
+   //memcpy(data, pr, 16777216);
+ // memcpy(testData, reinterpret_cast<unsigned char*>(ptr), 16777216);
+
+  // *input_size = npy_data.num_bytes();
+
+  // for (int i = 0; i < 30; i++) 
+  // {
+  //   printf("DATA: %f ", float_data[i]);
+  // }
+
+  // // *input_size = 240;
+
+  // std::cout << "Type of a: " << typeid(float_data).name() << std::endl;
+
+  // std::cout << "Type of b: " << typeid(ptr).name() << std::endl;
+
+  // std::cout << "size of a: " << sizeof(float_data) << std::endl;
+
+  // std::cout << "size of b: " << sizeof(ptr) << std::endl;
+
+
+
+
+  // float* Pf = test;  // Pf now points to the first element of A30_f
+
+  unsigned char* byte_data = (unsigned char*)data;
+  printf("DATA: %f", byte_data[0]);
+  printf("DATA: %f", data[0]);
+
+  return byte_data;
+  //return reinterpret_cast<unsigned char*>(Pf);
 }
 
 
@@ -268,15 +306,18 @@ int compute_custom_dual_residual_float32(rknn_custom_op_context* op_ctx, rknn_cu
   if (op_attr.n_elems == 1 && op_attr.dtype == RKNN_TENSOR_FLOAT32) {
     alpha = ((float*)op_attr.data)[0];
   }
-
   const auto out_elems = outputs[0].attr.n_elems; 
   for (size_t idx=0; idx<out_elems;idx++) {
-    printf("%g ", in_data_0[idx]);
+//     if (in_data_0[idx] > 0)
+//     {
+// printf("%d", in_data_0[idx]);
     
-    out_data_0[idx] = in_data_0[idx]; 
-    out_data_1[idx] = in_data_1[idx]; 
+//     }
+
+    out_data_0[idx] = in_data_0[idx] * 3.0f; 
+    out_data_1[idx] = in_data_1[idx]* 3.0f; 
   }
-   
+
   return 0;
 }
 
@@ -403,7 +444,7 @@ int main(int argc, char* argv[])
   printf("custom string: %s\n", custom_string.string);
 
   unsigned char* input_data[io_num.n_input];
-  int            input_type[io_num.n_input];
+  int            input_type[io_num.n_input];  
   int            input_layout[io_num.n_input];
   int            input_size[io_num.n_input];
   int            type_bytes[io_num.n_input];
@@ -508,7 +549,7 @@ int main(int argc, char* argv[])
   
   for (size_t idx=0; idx<out_elems;idx++) {
     const auto buf_data = (float *)outputs[0].buf;
-    printf("%f",buf_data[idx]);
+    printf("%f ",buf_data[idx]);
 
   }
   
@@ -528,9 +569,9 @@ int main(int argc, char* argv[])
   // destroy
   rknn_destroy(ctx);
 
-  for (int i = 0; i < io_num.n_input; i++) {
-    free(input_data[i]);
-  }
+  // for (int i = 0; i < io_num.n_input; i++) {
+  //   free(input_data[i]);
+  // }
 
   return 0;
 }

@@ -28,7 +28,7 @@ if __name__ == '__main__':
 
     # Pre-process config
     print('--> Config model')
-    rknn.config(mean_values=[[0, 0, 0]], std_values=[[1, 1, 1]], target_platform='rk3588')
+    rknn.config( target_platform='rk3588')
     print('done')
 
     # Register cstSigmoid op
@@ -41,7 +41,7 @@ if __name__ == '__main__':
 
     # Load model
     print('--> Loading model')
-    ret = rknn.load_onnx(model=custom_model_path, input_size_list=[[1, 3, 10]])
+    ret = rknn.load_onnx(model=custom_model_path)
     if ret != 0:
         print('Load model failed!')
         exit(ret)

@@ -211,20 +211,12 @@ static unsigned char *load_npy(const char *input_path, rknn_tensor_attr *input_a
     return NULL;
   }
   
-
-float test[300] = {
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-
-};// 1 * 3 * 20 
+float test[300] = { 1.0f };
 
 // data = reinterpret_cast<unsigned char*>(test);
   memcpy(data, npy_data.data<unsigned char>(), npy_data.num_bytes());
   float* float_data = reinterpret_cast<float*>(npy_data.data<unsigned char>());
+  
   for (int i = 0; i < 30; i++) 
   {
     printf("DATA: %f ", float_data[i]);

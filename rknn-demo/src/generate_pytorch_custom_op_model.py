@@ -29,8 +29,8 @@ class Model(torch.nn.Module):
         r1, r2 = torch.ops.cst.dual_residual(x, y, self.const)
         return r1, r2
 
-x = torch.randn(1, 3, 10)
-y = torch.randn(1, 3, 10)
+x = torch.randn(1, 2048, 2048)
+y = torch.randn(1, 2048, 2048)
 m = Model()
 z = m(x, y)
 

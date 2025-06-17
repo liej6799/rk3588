@@ -1,0 +1,4 @@
+python3 src/generate_pytorch_custom_op_model.py
+python3 src/convert.py
+./build-rk3588.sh
+./install/rknn_api_test_custom_cpu_op_Linux/rknn_api_test_custom_cpu_op dual_residual_custom.rknn dual_residual_input_0.npy#dual_residual_input_1.npy
