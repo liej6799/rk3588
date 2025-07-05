@@ -427,6 +427,7 @@ int main(int argc, char **argv) {
 
     printf("tasks[0] tasks: %p\n", (void*)tasks);
     printf("tasks_offset: %d\n", tasks->enable_mask);
+    printf("flags: %d\n", tasks->flags);
     printf("int_clear: %d\n", tasks->int_clear);
     printf("regcmd_addr: %p\n", tasks->regcmd_addr);
 
@@ -434,8 +435,34 @@ int main(int argc, char **argv) {
     struct rknpu_task *task_map = (struct rknpu_task *)map;
     printf("tasks[0] map: %p\n", (void*)task_map);
     printf("tasks_offset: %d\n", task_map->enable_mask);
+    printf("flags: %d\n", task_map->flags);
     printf("int_clear: %d\n", task_map->int_clear);
     printf("regcmd_addr: %p\n", task_map->regcmd_addr);
+
+    printf("regcmd: %p\n", regcmd);
+  uint64_t npu_regs[256];
+  memcpy(npu_regs, regcmd, 1024);
+  printf("npu_regs[0]: 0x%016lx\n", npu_regs[0]);
+  printf("npu_regs[1]: 0x%016lx\n", npu_regs[1]);
+  printf("npu_regs[2]: 0x%016lx\n", npu_regs[2]);
+  printf("npu_regs[3]: 0x%016lx\n", npu_regs[3]);
+
+  void *regmap = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0x100000000);
+  printf("regmap: %p\n", regmap);
+  int64_t npu_regs_map[256];
+  memcpy(npu_regs_map, regmap, 1024);
+  printf("npu_regs_map[0]: 0x%016lx\n", npu_regs_map[0]);
+  printf("npu_regs_map[1]: 0x%016lx\n", npu_regs_map[1]);
+  printf("npu_regs_map[2]: 0x%016lx\n", npu_regs_map[2]);
+  printf("npu_regs_map[3]: 0x%016lx\n", npu_regs_map[3]);
+
+  printf("regcmd_offset: %p\n", regcmd_offset);
+  printf("tasks_offset: %p\n", tasks_offset);
+  printf("fd: %d\n", fd);
+
+
+
+
 
     
 
