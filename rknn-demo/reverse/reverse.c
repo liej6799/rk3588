@@ -109,6 +109,8 @@
     0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
   };
 
+
+
 int feature_data(int C, int H, int W, int C2, int c, int h, int w) {
 
   int plane = (c-1)/C2;
@@ -141,7 +143,7 @@ int weight_data(int K, int C, int k, int c) {
   return dst;
 }	
 
-void* mem_allocate(int fd, size_t size, uint64_t *dma_addr, uint64_t *obj, uint32_t flags, uint32_t *handle) {
+void* mem_allocate(int fd, size_t size, uint64_t *dma_addr, uint64_t *obj, uint32_t flags, uint32_t *handle, uint64_t *offset) {
 
   int ret;
   struct rknpu_mem_create mem_create = {
@@ -162,10 +164,12 @@ void* mem_allocate(int fd, size_t size, uint64_t *dma_addr, uint64_t *obj, uint3
     return NULL;
   }	
   void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mem_map.offset);
+  printf("map: %p\n", mem_map.offset);
 
   *dma_addr = mem_create.dma_addr;
   *obj = mem_create.obj_addr;
   *handle = mem_create.handle;
+  *offset = mem_map.offset;
   return map;
 }
 
@@ -316,23 +320,28 @@ int main(int argc, char **argv) {
 
   uint64_t regcmd_dma, regcmd_obj;
   uint32_t regcmd_handle;
-  uint64_t *regcmd = mem_allocate(fd, 1024, &regcmd_dma, &regcmd_obj, 0, &regcmd_handle);
+  uint64_t regcmd_offset;
+  uint64_t *regcmd = mem_allocate(fd, 1024, &regcmd_dma, &regcmd_obj, 0, &regcmd_handle, &regcmd_offset);
 
   uint64_t tasks_dma, tasks_obj;
   uint32_t tasks_handle;
-  struct rknpu_task *tasks = mem_allocate(fd, 1024, &tasks_dma, &tasks_obj, RKNPU_MEM_KERNEL_MAPPING, &tasks_handle);
+  uint64_t tasks_offset;
+  struct rknpu_task *tasks = mem_allocate(fd, 1024, &tasks_dma, &tasks_obj, RKNPU_MEM_KERNEL_MAPPING, &tasks_handle, &tasks_offset);
 
   uint64_t input_dma, input_obj;
   uint32_t input_handle;
-  void *input = mem_allocate(fd, 4096, &input_dma, &input_obj, 0, &input_handle);
+  uint64_t input_offset;
+  void *input = mem_allocate(fd, 4096, &input_dma, &input_obj, 0, &input_handle, &input_offset);
 
   uint64_t weights_dma, weights_obj;
   uint32_t weights_handle;
-  void *weights = mem_allocate(fd, 4096, &weights_dma, &weights_obj, 0, &weights_handle);
+  uint64_t weights_offset;
+  void *weights = mem_allocate(fd, 4096, &weights_dma, &weights_obj, 0, &weights_handle, &weights_offset);
 
   uint64_t output_dma, output_obj;
   uint32_t output_handle;
-  void *output = mem_allocate(fd, 4096, &output_dma, &output_obj, 0, &output_handle);
+  uint64_t output_offset;
+  void *output = mem_allocate(fd, 4096, &output_dma, &output_obj, 0, &output_handle, &output_offset);
 
   printf("input dma is %lx, output dma is %lx, weights dma is %lx\n", input_dma, output_dma, weights_dma);
   if ((regcmd == NULL) || (tasks == NULL) || (input == NULL) || (weights == NULL) || (output == NULL)) {
@@ -411,11 +420,23 @@ int main(int argc, char **argv) {
     printf("RKNPU_SUBMIT returned %d\n", ret);
   }
 
-  printf("tasks_obj: %d\n", submit);
+    printf("tasks_obj: %d\n", submit);
   
- 
-    printf("submit.task_obj_addr: %p\n", (void*)submit.task_obj_addr);
-    printf("tasks[0]: %p\n", (void*)tasks);
+
+    printf("n: %p\n", submit.task_obj_addr);
+
+    printf("tasks[0] tasks: %p\n", (void*)tasks);
+    printf("tasks_offset: %d\n", tasks->enable_mask);
+    printf("int_clear: %d\n", tasks->int_clear);
+    printf("regcmd_addr: %p\n", tasks->regcmd_addr);
+
+    void *map = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, tasks_offset);
+    struct rknpu_task *task_map = (struct rknpu_task *)map;
+    printf("tasks[0] map: %p\n", (void*)task_map);
+    printf("tasks_offset: %d\n", task_map->enable_mask);
+    printf("int_clear: %d\n", task_map->int_clear);
+    printf("regcmd_addr: %p\n", task_map->regcmd_addr);
+
     
 
   printf("\n");

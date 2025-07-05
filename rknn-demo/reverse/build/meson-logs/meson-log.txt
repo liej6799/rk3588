@@ -1,4 +1,4 @@
-Build started at 2025-07-04T15:38:48.256871
+Build started at 2025-07-05T05:11:17.301354
 Main binary: /usr/bin/python3
 Build Options: 
 Python system: Linux
@@ -9,82 +9,8 @@ Build dir: /data/Dev/rk3588/rknn-demo/reverse/build
 Build type: native build
 Project name: rk3588-npu
 Project version: undefined
------
-Detecting compiler via: cc --version
-compiler returned <Popen: returncode: 0 args: ['cc', '--version']>
-compiler stdout:
-cc (Debian 12.2.0-14+deb12u1) 12.2.0
-Copyright (C) 2022 Free Software Foundation, Inc.
-This is free software; see the source for copying conditions.  There is NO
-warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-
-compiler stderr:
-
-Running command: cc -E -dM -
------
-Detecting linker via: cc -Wl,--version
-linker returned <Popen: returncode: 0 args: ['cc', '-Wl,--version']>
-linker stdout:
-GNU ld (GNU Binutils for Debian) 2.40
-Copyright (C) 2023 Free Software Foundation, Inc.
-This program is free software; you may redistribute it under the terms of
-the GNU General Public License version 3 or (at your option) a later version.
-This program has absolutely no warranty.
-
-linker stderr:
-collect2 version 12.2.0
-/usr/bin/ld -plugin /usr/lib/gcc/aarch64-linux-gnu/12/liblto_plugin.so -plugin-opt=/usr/lib/gcc/aarch64-linux-gnu/12/lto-wrapper -plugin-opt=-fresolution=/tmp/ccaEcV2I.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --build-id --eh-frame-hdr --hash-style=gnu --as-needed -dynamic-linker /lib/ld-linux-aarch64.so.1 -X -EL -maarch64linux --fix-cortex-a53-843419 -pie /usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu/Scrt1.o /usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu/crti.o /usr/lib/gcc/aarch64-linux-gnu/12/crtbeginS.o -L/usr/lib/gcc/aarch64-linux-gnu/12 -L/usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu -L/usr/lib/gcc/aarch64-linux-gnu/12/../../../../lib -L/lib/aarch64-linux-gnu -L/lib/../lib -L/usr/lib/aarch64-linux-gnu -L/usr/lib/../lib -L/usr/lib/gcc/aarch64-linux-gnu/12/../../.. --version -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /usr/lib/gcc/aarch64-linux-gnu/12/crtendS.o /usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu/crtn.o
-
-Sanity testing C compiler: cc
-Is cross compiler: False.
-Sanity check compiler command line: cc sanitycheckc.c -o sanitycheckc.exe -D_FILE_OFFSET_BITS=64
-Sanity check compile stdout:
-
------
-Sanity check compile stderr:
-
------
-Running test binary command:  /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/sanitycheckc.exe
 C compiler for the host machine: cc (gcc 12.2.0 "cc (Debian 12.2.0-14+deb12u1) 12.2.0")
 C linker for the host machine: cc ld.bfd 2.40
------
-Detecting compiler via: cc --version
-compiler returned <Popen: returncode: 0 args: ['cc', '--version']>
-compiler stdout:
-cc (Debian 12.2.0-14+deb12u1) 12.2.0
-Copyright (C) 2022 Free Software Foundation, Inc.
-This is free software; see the source for copying conditions.  There is NO
-warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-
-compiler stderr:
-
-Running command: cc -E -dM -
------
-Detecting linker via: cc -Wl,--version
-linker returned <Popen: returncode: 0 args: ['cc', '-Wl,--version']>
-linker stdout:
-GNU ld (GNU Binutils for Debian) 2.40
-Copyright (C) 2023 Free Software Foundation, Inc.
-This program is free software; you may redistribute it under the terms of
-the GNU General Public License version 3 or (at your option) a later version.
-This program has absolutely no warranty.
-
-linker stderr:
-collect2 version 12.2.0
-/usr/bin/ld -plugin /usr/lib/gcc/aarch64-linux-gnu/12/liblto_plugin.so -plugin-opt=/usr/lib/gcc/aarch64-linux-gnu/12/lto-wrapper -plugin-opt=-fresolution=/tmp/ccD4tNf2.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --build-id --eh-frame-hdr --hash-style=gnu --as-needed -dynamic-linker /lib/ld-linux-aarch64.so.1 -X -EL -maarch64linux --fix-cortex-a53-843419 -pie /usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu/Scrt1.o /usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu/crti.o /usr/lib/gcc/aarch64-linux-gnu/12/crtbeginS.o -L/usr/lib/gcc/aarch64-linux-gnu/12 -L/usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu -L/usr/lib/gcc/aarch64-linux-gnu/12/../../../../lib -L/lib/aarch64-linux-gnu -L/lib/../lib -L/usr/lib/aarch64-linux-gnu -L/usr/lib/../lib -L/usr/lib/gcc/aarch64-linux-gnu/12/../../.. --version -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /usr/lib/gcc/aarch64-linux-gnu/12/crtendS.o /usr/lib/gcc/aarch64-linux-gnu/12/../../../aarch64-linux-gnu/crtn.o
-
-Sanity testing C compiler: cc
-Is cross compiler: False.
-Sanity check compiler command line: cc sanitycheckc.c -o sanitycheckc.exe -D_FILE_OFFSET_BITS=64
-Sanity check compile stdout:
-
------
-Sanity check compile stderr:
-
------
-Running test binary command:  /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/sanitycheckc.exe
 C compiler for the build machine: cc (gcc 12.2.0 "cc (Debian 12.2.0-14+deb12u1) 12.2.0")
 C linker for the build machine: cc ld.bfd 2.40
 Build machine cpu family: aarch64
@@ -97,8 +23,8 @@ Build targets in project: 1
 
 Found ninja-1.11.1 at /usr/bin/ninja
 Running compile:
-Working directory:  /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/tmpy7oek_tl
-Command line:  cc /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/tmpy7oek_tl/testfile.c -o /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/tmpy7oek_tl/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 --print-search-dirs 
+Working directory:  /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/tmpp0z_cdz9
+Command line:  cc /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/tmpp0z_cdz9/testfile.c -o /data/Dev/rk3588/rknn-demo/reverse/build/meson-private/tmpp0z_cdz9/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 --print-search-dirs 
 
 Code:
  
@@ -109,4 +35,3 @@ libraries: =/usr/lib/gcc/aarch64-linux-gnu/12/:/usr/lib/gcc/aarch64-linux-gnu/12
 
 Compiler stderr:
  
-WARNING: Running the setup command as `meson [options]` instead of `meson setup [options]` is ambiguous and deprecated.

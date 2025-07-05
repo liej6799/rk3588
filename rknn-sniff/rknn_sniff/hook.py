@@ -20,6 +20,13 @@ import mmap
 
 alloc_sizes = {}
 mmaped = {}
+memory_mappings = {}  # Global dict to track
+
+def get_dma_addr_from_obj_addr(obj_addr):
+    for handle, mapping in memory_mappings.items():
+        if mapping['obj_addr'] == obj_addr:
+            return mapping['dma_addr']
+    return None
 
 def handle_ioctl(fd, request, argp, ret):
   fn = os.readlink(f"/proc/self/fd/{fd}")
@@ -40,9 +47,10 @@ def handle_ioctl(fd, request, argp, ret):
             addr_int = int(addr_str, 16)
         else:
             addr_int = int(addr_str)
-        data_ptr = ctypes.cast(addr_str, ctypes.POINTER(rk.struct_rknpu_task))
-        data = data_ptr.contents
-        print('FLAGS', data.flags)
+        dma_addr = get_dma_addr_from_obj_addr(data)
+        method = (st.task_obj_addr>>24) & 0xFF
+        print("method", method, "dma_addr", dma_addr)
+
         # print('INT_MASK', data.int_mask)
         # print('OP_IDX', data.op_idx)
         # print('ENABLE_MASK', data.enable_mask)
