@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rknn-sniff"
+version = "0.1.0"
+description = "A package for RKNN model hooking/sniffing utilities."
+authors = [
+    { name="Your Name", email="your@email.com" }
+]
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    # Add your dependencies here, e.g. "tinygrad"
+] 

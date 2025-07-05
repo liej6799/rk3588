@@ -17,18 +17,18 @@ static unsigned char *load_npy(rknn_tensor_attr *input_attr, int *input_type, in
 {
 
 
-float* test = (float*)malloc(16777216 * sizeof(float));
+float* test = (float*)malloc(100 * sizeof(float));
 
-for (size_t i = 0; i < 16777216; ++i) {
+for (size_t i = 0; i < 100; ++i) {
 test[i] = 10.0f;
 }
 
 // Dynamically allocate destination buffer
-float* data = (float*)malloc(16777216 * sizeof(float));
+float* data = (float*)malloc(100 * sizeof(float));
 
 // Copy the data
 //memcpy(data, test, 1048576 * sizeof(float)); // Does not hit SegFault
-memcpy(data, test, 16777216 * sizeof(float)); // Hit SegFault
+memcpy(data, test, 100 * sizeof(float)); // Hit SegFault
 //memcpy(data, pr, 16777216);
 // memcpy(testData, reinterpret_cast<unsigned char*>(ptr), 16777216);
 
@@ -252,6 +252,7 @@ for (int i = 0; i < io_num.n_input; i++) {
     return -1;
   }
 
+  rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1_2);
   // Run
   printf("Begin perf ...\n");
   double total_time = 0;
@@ -267,24 +268,6 @@ for (int i = 0; i < io_num.n_input; i++) {
   }
   printf("Avg elapse Time = %.3fms\n", total_time / 1);
   printf("Avg FPS = %.3f\n", 1 * 1000.f / total_time);
-
-  // Get perf detail
-  rknn_perf_detail perf_detail;
-  ret = rknn_query(ctx, RKNN_QUERY_PERF_DETAIL, &perf_detail, sizeof(perf_detail));
-  if (ret != RKNN_SUCC) {
-    printf("rknn_query fail! ret=%d\n", ret);
-    return -1;
-  }
-  printf("rknn run perf detail is:\n%s", perf_detail.perf_data);
-
-  // Get run duration time
-  rknn_perf_run perf_run;
-  ret = rknn_query(ctx, RKNN_QUERY_PERF_RUN, &perf_run, sizeof(perf_run));
-  if (ret != RKNN_SUCC) {
-    printf("rknn_query fail! ret=%d\n", ret);
-    return -1;
-  }
-  printf("rknn run perf time is %ldus\n", perf_run.run_duration);
 
   // Get output
   rknn_output outputs[io_num.n_output];

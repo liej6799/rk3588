@@ -1,6 +1,7 @@
 __attribute__((constructor))
 void preload_init() {
   Py_Initialize();
+  PyRun_SimpleString("print('hello from c'); import hook");
 }
 
 #define _GNU_SOURCE  // Must be defined before any includes for RTLD_NEXT
@@ -34,7 +35,7 @@ int ioctl(int fd, unsigned long request, void *arg) {
 	//gstate = PyGILState_Ensure();
 
 	// Import the module
-	pName = PyUnicode_FromString("rknn_sniff.hook");
+	pName = PyUnicode_FromString("hook");
 	pModule = PyImport_Import(pName);
 	Py_DECREF(pName);
 
@@ -68,11 +69,10 @@ int ioctl(int fd, unsigned long request, void *arg) {
 		Py_DECREF(pModule);
 	} else {
 			PyErr_Print();
-		fprintf(stderr, "Failed to load 'extra.dsp.hook'\n");
+		fprintf(stderr, "Failed to load 'tinygrad.extra.hook'\n");
 	}
 
 	// Release the GIL
 	//PyGILState_Release(gstate);
 	return ret;
 }
-

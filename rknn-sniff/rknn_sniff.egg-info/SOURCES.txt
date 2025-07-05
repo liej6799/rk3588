@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+rknn_sniff/__init__.py
+rknn_sniff/hook.py
+rknn_sniff.egg-info/PKG-INFO
+rknn_sniff.egg-info/SOURCES.txt
+rknn_sniff.egg-info/dependency_links.txt
+rknn_sniff.egg-info/top_level.txt

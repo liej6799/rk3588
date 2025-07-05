@@ -1,0 +1,8 @@
+[
+  {
+    "directory": "/data/Dev/rk3588/rknn-demo/reverse/build",
+    "command": "cc -Ireverse.p -I. -I.. -I../include -fdiagnostics-color=always -D_FILE_OFFSET_BITS=64 -Wall -Winvalid-pch -O0 -g -MD -MQ reverse.p/reverse.c.o -MF reverse.p/reverse.c.o.d -o reverse.p/reverse.c.o -c ../reverse.c",
+    "file": "../reverse.c",
+    "output": "reverse.p/reverse.c.o"
+  }
+]

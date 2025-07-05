@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wl,--allow-shlib-undefined CMakeFiles/reverse.dir/reverse.cpp.o -o reverse  -Wl,-rpath,/data/Dev/rk3588/rknn-demo/reverse/../../rknn-header: /data/Dev/rk3588/rknn-demo/reverse/../../rknn-header//librknnrt.so 

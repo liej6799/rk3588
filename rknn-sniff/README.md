@@ -1,0 +1,28 @@
+# rknn-sniff
+
+A package for RKNN model hooking/sniffing utilities.
+
+## Features
+- Hook and log mmap/ioctl calls for Rockchip NPU devices
+- Utilities for inspecting RKNN driver structures
+
+## Usage
+
+Install locally:
+```sh
+pip install .
+```
+
+Import and use in your Python code:
+```python
+from hook import handle_ioctl
+# or
+import hook
+```
+
+## Requirements
+- Python 3.7+
+- [tinygrad](https://github.com/tinygrad/tinygrad) (for struct helpers)
+
+## License
+MIT 
