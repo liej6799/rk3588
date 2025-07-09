@@ -15,6 +15,7 @@ include_directories(${RKNN_API_PATH})
 
 # Add libdrm include path
 include_directories(/usr/include/libdrm)
+include_directories(/usr/include)
 
 # stb
 include_directories(${CMAKE_SOURCE_DIR}/include/)

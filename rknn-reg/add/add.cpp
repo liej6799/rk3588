@@ -8,9 +8,16 @@
 #include <typeinfo>
 #include <sys/types.h>
 #include <sys/stat.h>
-
+#include <fcntl.h>
 #include "rknn_api.h"
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+
+#include <libdrm/drm.h>
+#include "rknpu-ioctl.h"
 
 static unsigned char *load_npy(rknn_tensor_attr *input_attr, int *input_type, int *input_size,
     int *type_bytes)
@@ -121,6 +128,7 @@ static void* load_file(const char* file_path, size_t* file_size)
 int main() {
     printf("Hello, World!\n");
 
+
     // Load model file
     const char* model_path = "../add.rknn";
     FILE* fp = fopen(model_path, "rb");
@@ -168,128 +176,180 @@ int main() {
   }
   printf("total weight size: %u, total internal size: %u\n", mem_size.total_weight_size, mem_size.total_internal_size);
   printf("total dma used size: %zu\n", (size_t)mem_size.total_dma_allocated_size);
+  void *map = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, 3, 0x100000000);
 
 
-  // Get Model Input Output Info
-  rknn_input_output_num io_num;
-  ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
-  if (ret != RKNN_SUCC) {
-    printf("rknn_query fail! ret=%d\n", ret);
-    return -1;
-  }
-  printf("model input num: %d, output num: %d\n", io_num.n_input, io_num.n_output);
+    if (map == MAP_FAILED) {
+        perror("mmap failed");
+    } else {
+        uint64_t map_data[128]; // 1024 bytes / 8 bytes per uint64_t = 128
+        memcpy(map_data, map, 1024);
 
-  printf("input tensors:\n");
-  rknn_tensor_attr input_attrs[io_num.n_input];
-  memset(input_attrs, 0, io_num.n_input * sizeof(rknn_tensor_attr));
-  for (uint32_t i = 0; i < io_num.n_input; i++) {
-    input_attrs[i].index = i;
-    // query info
-    ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
-    if (ret < 0) {
-      printf("rknn_query error! ret=%d\n", ret);
-      return -1;
+        printf("map_data[0]: 0x%016lx\n", map_data[0]);
+        printf("map_data[1]: 0x%016lx\n", map_data[1]);
+        printf("map_data[2]: 0x%016lx\n", map_data[2]);
+        printf("map_data[3]: 0x%016lx\n", map_data[3]);
     }
-    dump_tensor_attr(&input_attrs[i]);
-  }
 
-  printf("output tensors:\n");
-  rknn_tensor_attr output_attrs[io_num.n_output];
-  memset(output_attrs, 0, io_num.n_output * sizeof(rknn_tensor_attr));
-  for (uint32_t i = 0; i < io_num.n_output; i++) {
-    output_attrs[i].index = i;
-    // query info
-    ret = rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
-    if (ret != RKNN_SUCC) {
-      printf("rknn_query fail! ret=%d\n", ret);
-      return -1;
+    
+    struct rknpu_task *task_map = (struct rknpu_task *)map;
+
+    printf("tasks[0] map: %p\n", (void*)task_map);
+    printf("struct rknpu_task fields:\n");
+    printf("  flags:         %u\n", task_map->flags);
+    printf("  op_idx:        %u\n", task_map->op_idx);
+    printf("  enable_mask:   %u\n", task_map->enable_mask);
+    printf("  int_mask:      %u\n", task_map->int_mask);
+    printf("  int_clear:     %u\n", task_map->int_clear);
+    printf("  int_status:    %u\n", task_map->int_status);
+    printf("  regcfg_amount: %u\n", task_map->regcfg_amount);
+    printf("  regcfg_offset: %u\n", task_map->regcfg_offset);
+    printf("  regcmd_addr:   0x%016lx\n", (unsigned long)task_map->regcmd_addr);
+
+    void *regmap = mmap(NULL, 3096, PROT_READ | PROT_WRITE, MAP_SHARED, 3, 0x100001000);
+    printf("regmap: %p\n", regmap);
+    int64_t npu_regs_map[3096 / sizeof(int64_t)];
+    memcpy(npu_regs_map, regmap, 3096);
+    printf("npu_regs_map[0]: 0x%016lx\n", npu_regs_map[0]);
+    printf("npu_regs_map[1]: 0x%016lx\n", npu_regs_map[1]);
+    printf("npu_regs_map[2]: 0x%016lx\n", npu_regs_map[2]);
+    printf("npu_regs_map[3]: 0x%016lx\n", npu_regs_map[3]);
+    
+    unsigned char first_3096[3096];
+    memcpy(first_3096, regmap, 3096);
+    printf("First 3096 bytes from map:\n");
+    for (int i = 0; i < 3096; i++) {
+        printf("%02x", first_3096[i]);
+        if ((i+1) % 32 == 0) printf("\n");
+        else if ((i+1) % 4 == 0) printf(" ");
     }
-    dump_tensor_attr(&output_attrs[i]);
-  }
+    printf("\n");
 
 
-  unsigned char* input_data[io_num.n_input];
-  int            input_type[io_num.n_input];  
-  int            input_layout[io_num.n_input];
-  int            input_size[io_num.n_input];
-  int            type_bytes[io_num.n_input];
-  for (int i = 0; i < io_num.n_input; i++) {
-    input_data[i]   = NULL;
-    input_type[i]   = RKNN_TENSOR_FLOAT32;
-    input_layout[i] = RKNN_TENSOR_UNDEFINED;
-    input_size[i]   = input_attrs[i].n_elems * sizeof(float);
-    type_bytes[i] = 4;
-  }
+//   // Get Model Input Output Info
+//   rknn_input_output_num io_num;
+//   ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
+//   if (ret != RKNN_SUCC) {
+//     printf("rknn_query fail! ret=%d\n", ret);
+//     return -1;
+//   }
+//   printf("model input num: %d, output num: %d\n", io_num.n_input, io_num.n_output);
+
+//   printf("input tensors:\n");
+//   rknn_tensor_attr input_attrs[io_num.n_input];
+//   memset(input_attrs, 0, io_num.n_input * sizeof(rknn_tensor_attr));
+//   for (uint32_t i = 0; i < io_num.n_input; i++) {
+//     input_attrs[i].index = i;
+//     // query info
+//     ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
+//     if (ret < 0) {
+//       printf("rknn_query error! ret=%d\n", ret);
+//       return -1;
+//     }
+//     dump_tensor_attr(&input_attrs[i]);
+//   }
+
+//   printf("output tensors:\n");
+//   rknn_tensor_attr output_attrs[io_num.n_output];
+//   memset(output_attrs, 0, io_num.n_output * sizeof(rknn_tensor_attr));
+//   for (uint32_t i = 0; i < io_num.n_output; i++) {
+//     output_attrs[i].index = i;
+//     // query info
+//     ret = rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
+//     if (ret != RKNN_SUCC) {
+//       printf("rknn_query fail! ret=%d\n", ret);
+//       return -1;
+//     }
+//     dump_tensor_attr(&output_attrs[i]);
+//   }
+
+
+//   unsigned char* input_data[io_num.n_input];
+//   int            input_type[io_num.n_input];  
+//   int            input_layout[io_num.n_input];
+//   int            input_size[io_num.n_input];
+//   int            type_bytes[io_num.n_input];
+//   for (int i = 0; i < io_num.n_input; i++) {
+//     input_data[i]   = NULL;
+//     input_type[i]   = RKNN_TENSOR_FLOAT32;
+//     input_layout[i] = RKNN_TENSOR_UNDEFINED;
+//     input_size[i]   = input_attrs[i].n_elems * sizeof(float);
+//     type_bytes[i] = 4;
+//   }
 
  
-for (int i = 0; i < io_num.n_input; i++) {
-    // Load npy file 
-    input_data[i] = load_npy(&input_attrs[i], &input_type[i], 
-                            &input_size[i], &type_bytes[i]);
+// for (int i = 0; i < io_num.n_input; i++) {
+//     // Load npy file 
+//     input_data[i] = load_npy(&input_attrs[i], &input_type[i], 
+//                             &input_size[i], &type_bytes[i]);
 
-    if (!input_data[i]) {
-    return -1;
-    }
-}
+//     if (!input_data[i]) {
+//     return -1;
+//     }
+// }
 
 
-  rknn_input inputs[io_num.n_input];
-  memset(inputs, 0, io_num.n_input * sizeof(rknn_input));
-  for (int i = 0; i < io_num.n_input; i++) {
-    inputs[i].index        = i;
-    inputs[i].pass_through = 0;
-    inputs[i].type         = (rknn_tensor_type)input_type[i];
-    inputs[i].fmt          = RKNN_TENSOR_UNDEFINED;
-    inputs[i].buf          = input_data[i];
-    inputs[i].size         = input_size[i];
-  }
+//   rknn_input inputs[io_num.n_input];
+//   memset(inputs, 0, io_num.n_input * sizeof(rknn_input));
+//   for (int i = 0; i < io_num.n_input; i++) {
+//     inputs[i].index        = i;
+//     inputs[i].pass_through = 0;
+//     inputs[i].type         = (rknn_tensor_type)input_type[i];
+//     inputs[i].fmt          = RKNN_TENSOR_UNDEFINED;
+//     inputs[i].buf          = input_data[i];
+//     inputs[i].size         = input_size[i];
+//   }
   
 
-  // Set input
-  ret = rknn_inputs_set(ctx, io_num.n_input, inputs);
-  if (ret < 0) {
-    printf("rknn_input_set fail! ret=%d\n", ret);
-    return -1;
-  }
+//   // Set input
+//   ret = rknn_inputs_set(ctx, io_num.n_input, inputs);
+//   if (ret < 0) {
+//     printf("rknn_input_set fail! ret=%d\n", ret);
+//     return -1;
+//   }
 
-  rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1_2);
-  // Run
-  printf("Begin perf ...\n");
-  double total_time = 0;
-  for (int i = 0; i < 1; ++i) {
-    int64_t start_us  = getCurrentTimeUs();
-    ret               = rknn_run(ctx, NULL);
-    int64_t elapse_us = getCurrentTimeUs() - start_us; if (ret < 0) {
-      printf("rknn run error %d\n", ret);
-      return -1;
-    }
-    total_time += elapse_us / 1000.f;
-    printf("%4d: Elapse Time = %.2fms, FPS = %.2f\n", i, elapse_us / 1000.f, 1000.f * 1000.f / elapse_us);
-  }
-  printf("Avg elapse Time = %.3fms\n", total_time / 1);
-  printf("Avg FPS = %.3f\n", 1 * 1000.f / total_time);
+//   rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1_2);
+//   // Run
+//   printf("Begin perf ...\n");
+//   double total_time = 0;
+//   for (int i = 0; i < 1; ++i) {
+//     int64_t start_us  = getCurrentTimeUs();
+//     ret               = rknn_run(ctx, NULL);
+//     int64_t elapse_us = getCurrentTimeUs() - start_us; if (ret < 0) {
+//       printf("rknn run error %d\n", ret);
+//       return -1;
+//     }
+//     total_time += elapse_us / 1000.f;
+//     printf("%4d: Elapse Time = %.2fms, FPS = %.2f\n", i, elapse_us / 1000.f, 1000.f * 1000.f / elapse_us);
+//   }
+//   printf("Avg elapse Time = %.3fms\n", total_time / 1);
+//   printf("Avg FPS = %.3f\n", 1 * 1000.f / total_time);
 
-  // Get output
-  rknn_output outputs[io_num.n_output];
-  memset(outputs, 0, io_num.n_output * sizeof(rknn_output));
-  for (uint32_t i = 0; i < io_num.n_output; ++i) {
-    outputs[i].want_float  = 1;
-    outputs[i].index       = i;
-    outputs[i].is_prealloc = 0;
-  }
+//   // Get output
+//   rknn_output outputs[io_num.n_output];
+//   memset(outputs, 0, io_num.n_output * sizeof(rknn_output));
+//   for (uint32_t i = 0; i < io_num.n_output; ++i) {
+//     outputs[i].want_float  = 1;
+//     outputs[i].index       = i;
+//     outputs[i].is_prealloc = 0;
+//   }
 
-  ret = rknn_outputs_get(ctx, io_num.n_output, outputs, NULL);
-  if (ret < 0) {
-    printf("rknn_outputs_get fail! ret=%d\n", ret);
-    return ret;
-  }
+//   ret = rknn_outputs_get(ctx, io_num.n_output, outputs, NULL);
+//   if (ret < 0) {
+//     printf("rknn_outputs_get fail! ret=%d\n", ret);
+//     return ret;
+//   }
   
-  const auto out_elems = output_attrs[0].n_elems; 
+//   const auto out_elems = output_attrs[0].n_elems; 
 
-  for (size_t idx=0; idx<out_elems;idx++) {
-    const auto buf_data = (float *)outputs[0].buf;
-    printf("%f ",buf_data[idx]);
+//   for (size_t idx=0; idx<out_elems;idx++) {
+//     const auto buf_data = (float *)outputs[0].buf;
+//     printf("%f ",buf_data[idx]);
 
-  }
+//   }
+
+
+
+
     return 0;
 }
