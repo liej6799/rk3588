@@ -411,7 +411,7 @@ int main(int argc, char **argv) {
     .subcore_task = { // Only use core 1, nothing for core 2/3
       {
         .task_start = 0,
-        .task_number = 1,
+        .task_number = 2,
       }, { 1, 0}, {2, 0},
     },
   };
@@ -467,28 +467,27 @@ int main(int argc, char **argv) {
 
   void *regmap = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0x100000000);
   printf("regmap: %p\n", regmap);
-  int64_t npu_regs_map[256];
+  int64_t npu_regs_map[1024 / sizeof(int64_t)];
   memcpy(npu_regs_map, regmap, 1024);
-  printf("npu_regs_map[0]: 0x%016lx\n", npu_regs_map[0]);
-  printf("npu_regs_map[1]: 0x%016lx\n", npu_regs_map[1]);
-  printf("npu_regs_map[2]: 0x%016lx\n", npu_regs_map[2]);
-  printf("npu_regs_map[3]: 0x%016lx\n", npu_regs_map[3]);
-
+  for (int i = 0; i < 128; i++) {
+      printf("npu_regs_map[%d]: 0x%016lx\n", i, npu_regs_map[i]);
+  }
+  
   // printf("regcmd_offset: %p\n", regcmd_offset);
   // printf("tasks_offset: %p\n", tasks_offset);
   printf("fd: %d\n", fd);
 
 
 
-  unsigned char first_1024[1024];
-  memcpy(first_1024, regmap, 1024);
-  printf("First 1024 bytes from map:\n");
-  for (int i = 0; i < 1024; i++) {
-      printf("%02x", first_1024[i]);
-      if ((i+1) % 32 == 0) printf("\n");
-      else if ((i+1) % 4 == 0) printf(" ");
-  }
-  printf("\n");
+  // unsigned char first_1024[1024];
+  // memcpy(first_1024, regmap, 1024);
+  // printf("First 1024 bytes from map:\n");
+  // for (int i = 0; i < 1024; i++) {
+  //     printf("%02x", first_1024[i]);
+  //     if ((i+1) % 32 == 0) printf("\n");
+  //     else if ((i+1) % 4 == 0) printf(" ");
+  // }
+  // printf("\n");
 
 
     

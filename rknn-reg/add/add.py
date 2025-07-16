@@ -7,7 +7,6 @@ class Model(torch.nn.Module):
 
     def forward(self, x, y):
         return x + y
-
 x = torch.full((1, 10), 1.0)
 y = torch.full((1, 10), 1.0)
 

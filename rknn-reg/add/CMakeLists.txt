@@ -26,9 +26,13 @@ set(CMAKE_INSTALL_RPATH "lib")
 add_executable(add add.cpp)
 target_link_libraries(add ${RKNN_RT_LIB})
 
+# Build 'addreg' demo
+add_executable(addreg addreg.cpp)
+target_link_libraries(addreg ${RKNN_RT_LIB})
+
 # Install target and libraries
 set(CMAKE_INSTALL_PREFIX ${CMAKE_SOURCE_DIR}/install/rknn_api_demo_${CMAKE_SYSTEM_NAME})
-install(TARGETS add DESTINATION ./)
+install(TARGETS add addreg DESTINATION ./)
 
 # Install model and image files
 install(DIRECTORY model/${TARGET_SOC} DESTINATION ./model)

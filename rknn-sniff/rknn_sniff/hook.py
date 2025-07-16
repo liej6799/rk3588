@@ -34,7 +34,12 @@ def handle_ioctl(fd, request, argp, ret):
         elif nr == 65: # 0x40 + 0x01
             st = get_struct(argp, rk.struct_rknpu_submit)
   
-            print(ret, "struct_rknpu_submit", format_struct(st))      
+            print(ret, "struct_rknpu_submit", format_struct(st))     
+            # Print sub_core_task (struct_rknpu_subcore_task_Array_5)
+            subcore_task = st.subcore_task
+            print("subcore_task:")
+            for i, sct in enumerate(subcore_task):
+                print(f"  [{i}] task_start: {sct.task_start}, task_number: {sct.task_number}")
 # Get first 1024 bytes of the mmap
             # Convert mmaped data to struct_rknpu_task
    
