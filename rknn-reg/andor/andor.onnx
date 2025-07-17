@@ -1,0 +1,26 @@
+pytorch2.2.0:ç
+6
+onnx::Cast_0/Cast_output_0/Cast"Cast*	
+to	†
+:
+onnx::Cast_1/Cast_1_output_0/Cast_1"Cast*	
+to	†
+0
+/Cast_output_0
+/Cast_1_output_04/Xor"Xor
+main_graphZ 
+onnx::Cast_0
+	
+
+Ä 
+Ä Z 
+onnx::Cast_1
+	
+
+Ä 
+Ä b
+4
+	
+
+Ä 
+Ä B

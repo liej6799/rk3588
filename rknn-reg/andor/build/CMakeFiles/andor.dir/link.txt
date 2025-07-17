@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wl,--allow-shlib-undefined CMakeFiles/andor.dir/andor.cpp.o -o andor  -Wl,-rpath,/data/Dev/rk3588/rknn-reg/andor/../../rknn-header: /data/Dev/rk3588/rknn-reg/andor/../../rknn-header//librknnrt.so 

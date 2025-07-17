@@ -1,0 +1,7 @@
+/data/Dev/rk3588/rknn-reg/matmul/build/CMakeFiles/matmul.dir
+/data/Dev/rk3588/rknn-reg/matmul/build/CMakeFiles/edit_cache.dir
+/data/Dev/rk3588/rknn-reg/matmul/build/CMakeFiles/rebuild_cache.dir
+/data/Dev/rk3588/rknn-reg/matmul/build/CMakeFiles/list_install_components.dir
+/data/Dev/rk3588/rknn-reg/matmul/build/CMakeFiles/install.dir
+/data/Dev/rk3588/rknn-reg/matmul/build/CMakeFiles/install/local.dir
+/data/Dev/rk3588/rknn-reg/matmul/build/CMakeFiles/install/strip.dir

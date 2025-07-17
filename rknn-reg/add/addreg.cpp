@@ -45,106 +45,80 @@
    // Updated npu_regs[] to match the values from the latest npu_regs_map2 dump
   
    uint64_t npu_regs[] = {
-   0x0000000000000001, // 0
-   0x0000000000000001, // 1
-   0x0000000000000001, // 2
-   0x000000000000000a, // 3
-   0x0000000000000000, // 4
-   0x0000000000000000, // 5
-   0x0000000000000000, // 6
-   0x0000000000000000, // 7
-   0x0000000000000001, // 8
-   0x0000000000000001, // 9
-   0x0000000000000001, // 10
-   0x000000000000000a, // 11
-   0x0000000000000000, // 12
-   0x0000000000000000, // 13
-   0x0000000000000000, // 14
-   0x0000000000000000, // 15
-   0x0000000000000001, // 16
-   0x000000000000000a, // 17
-   0x0000000000000000, // 18
-   0x0000000000000000, // 19
-   0x0000000000000000, // 20
-   0x0000000000000000, // 21
-   0x0000000000000000, // 22
-   0x0000000000000000, // 23
-   0x10010000000e4004, // 24
-   0x20010000000e5004, // 25
-   0x1001000001e5400c, // 26
-   0x1001480000024010, // 27
-   0x1001000000004014, // 28
-   0x1001000000004020, // 29
-   0x1001000000c04024, // 30
-   0x1001000000094030, // 31
-   0x1001000000004034, // 32
-   0x1001000000004038, // 33
-   0x100100070007403c, // 34
-   0x1001000000534040, // 35
-   0x1001000000004044, // 36
-   0x1001000000004048, // 37
-   0x100100000000404c, // 38
-   0x1001000000024050, // 39
-   0x1001000000004054, // 40
-   0x1001000000074058, // 41
-   0x100100000009405c, // 42
-   0x1001000000534060, // 43
-   0x1001000000004064, // 44
-   0x1001000000004068, // 45
-   0x100100000000406c, // 46
-   0x1001108402c04070, // 47 // 0x1001108003c44070 0x1001108202c04070 0x1001108402c04070
-   0x1001000000004074, // 48
-   0x1001000000014078, // 49
-   0x100100000000407c, // 50
-   0x1001000000004080, // 51
-   0x1001000100014084, // 52
-   0x1001000000004088, // 53
-   0x1001000000004090, // 54
-   0x1001000000004094, // 55
-   0x1001000000004098, // 56
-   0x100100000000409c, // 57
-   0x10010000000040a0, // 58
-   0x10010000000040a4, // 59
-   0x10010000000040a8, // 60
-   0x10010000000040ac, // 61
-   0x1001000000c040c0, // 62
-   0x10010000000040c4, // 63
-   0x1001000000004100, // 64
-   0x1001000000004104, // 65
-   0x1001000000004108, // 66
-   0x100100000000410c, // 67
-   0x1001000000004110, // 68
-   0x1001000000004114, // 69
-   0x1001000000004118, // 70
-   0x100100000000411c, // 71
-   0x1001000000004120, // 72
-   0x1001000000004124, // 73
-   0x1001000000004128, // 74
-   0x100100000000412c, // 75
-   0x200100000009500c, // 76
-   0x2001000000005010, // 77
-   0x2001000000075014, // 78
-   0x2001000000005018, // 79
-   0x200100000000501c, // 80
-   0x2001000000005020, // 81
-   0x2001000000005028, // 82
-   0x200100000000502c, // 83
-   0x2001400000085034, // 84
-   0x2001000000005038, // 85
-   0x2001000000c05040, // 86
-   0x2001000178495044, // 87
-   0x2001000000005048, // 88
-   0x200100000020504c, // 89
-   0x2001000000005064, // 90
-   0x2001010101015068, // 91
-   0x200100000020506c, // 92
-   0x0000000000000000, // 93
-   0x0101000000000014, // 94
-   0x0041000000000000, // 95
-   0x0081000000180008, // 96
-   0x0000000000000000, // 97
-   0x0000000000000000, // 98
-   0x0000000000000000  // 99
+   0x10010000000e4004, // 0
+   0x20010000000e5004, // 1
+   0x1001000001e5400c, // 2
+   0x1001480000024010, // 3
+   0x1001000000004014, // 4
+   0x1001000000004020, // 5
+   0x1001000000c04024, // 6
+   0x1001000000094030, // 7
+   0x1001000000004034, // 8
+   0x1001000000004038, // 9
+   0x100100070007403c, // 10
+   0x1001000000534040, // 11
+   0x1001000000004044, // 12
+   0x1001000000004048, // 13
+   0x100100000000404c, // 14
+   0x1001000000024050, // 15
+   0x1001000000004054, // 16
+   0x1001000000074058, // 17
+   0x100100000009405c, // 18
+   0x1001000000534060, // 19
+   0x1001000000004064, // 20
+   0x1001000000004068, // 21
+   0x100100000000406c, // 22
+   0x1001108202c04070, // 23 // 0x1001108003c44070 0x1001108202c04070 0x1001108402c04070
+   0x1001000000004074, // 24
+   0x1001000000014078, // 25
+   0x100100000000407c, // 26
+   0x1001000000004080, // 27
+   0x1001000100014084, // 28
+   0x1001000000004088, // 29
+   0x1001000000004090, // 30
+   0x1001000000004094, // 31
+   0x1001000000004098, // 32
+   0x100100000000409c, // 33
+   0x10010000000040a0, // 34
+   0x10010000000040a4, // 35
+   0x10010000000040a8, // 36
+   0x10010000000040ac, // 37
+   0x1001000000c040c0, // 38
+   0x10010000000040c4, // 39
+   0x1001000000004100, // 40
+   0x1001000000004104, // 41
+   0x1001000000004108, // 42
+   0x100100000000410c, // 43
+   0x1001000000004110, // 44
+   0x1001000000004114, // 45
+   0x1001000000004118, // 46
+   0x100100000000411c, // 47
+   0x1001000000004120, // 48
+   0x1001000000004124, // 49
+   0x1001000000004128, // 50
+   0x100100000000412c, // 51
+   0x200100000009500c, // 52
+   0x2001000000005010, // 53
+   0x2001000000075014, // 54
+   0x2001000000005018, // 55
+   0x200100000000501c, // 56
+   0x2001000000005020, // 57
+   0x2001000000005028, // 58
+   0x200100000000502c, // 59
+   0x2001400000085034, // 60
+   0x2001000000005038, // 61
+   0x2001000000c05040, // 62
+   0x2001000178495044, // 63
+   0x2001000000005048, // 64
+   0x200100000020504c, // 65
+   0x2001000000005064, // 66
+   0x2001010101015068, // 67
+   0x200100000020506c, // 68
+   0x0000000000000000, // 69
+   0x0101000000000014, // 70
+   0x0041000000000000, // 71
+   0x0081000000180008, // 72
+  
   
    };
  
@@ -269,15 +243,15 @@
 
    uint64_t input_dma, input_obj;
    uint32_t input_handle;
-   void *input = mem_allocate(fd, 4096, &input_dma, &input_obj, 0, &input_handle);
+   void *input = mem_allocate(fd, 4194304, &input_dma, &input_obj, 0, &input_handle);
  
    uint64_t weights_dma, weights_obj;
    uint32_t weights_handle;
-   void *weights = mem_allocate(fd, 4096, &weights_dma, &weights_obj, 0, &weights_handle);
+   void *weights = mem_allocate(fd, 4194304, &weights_dma, &weights_obj, 0, &weights_handle);
  
    uint64_t output_dma, output_obj;
    uint32_t output_handle;
-   void *output = mem_allocate(fd, 4096, &output_dma, &output_obj, 0, &output_handle);
+   void *output = mem_allocate(fd, 4194304, &output_dma, &output_obj, 0, &output_handle);
  
    printf("input dma is %lx, output dma is %lx, weights dma is %lx\n", input_dma, output_dma, weights_dma);
    if ((regcmd == NULL) || (tasks == NULL) || (input == NULL) || (weights == NULL) || (output == NULL)) {
@@ -293,9 +267,12 @@
  
    // Set input, weights and output physical memory locations. Note limited to 
    // a 32 bit address size (4GB)
-   npu_regs[79] = npu_regs[79] | ((input_dma & 0xFFFFFFFF) <<16);
-   npu_regs[85] = npu_regs[85] | ((weights_dma & 0xFFFFFFFF)  <<16);
-   npu_regs[29] = npu_regs[29] | ((output_dma & 0xFFFFFFFF) <<16);
+   npu_regs[55] = npu_regs[55] | ((input_dma & 0xFFFFFFFF) <<16);
+   npu_regs[61] = npu_regs[61] | ((weights_dma & 0xFFFFFFFF)  <<16);
+   npu_regs[5] = npu_regs[5] | ((output_dma & 0xFFFFFFFF) <<16);
+   printf("input_dma %lx\n", input_dma);
+   printf("weights_dma %lx\n", weights_dma);
+   printf("output_dma %lx\n", output_dma);
    printf("npu_regs[79] %lx\n", npu_regs[79]);
    printf("npu_regs[85] %lx\n", npu_regs[85]);
    printf("npu_regs[29] %lx\n", npu_regs[29]);
@@ -312,38 +289,22 @@
    tasks[0].regcfg_offset = 0;
    tasks[0].regcmd_addr = regcmd_dma;
  
-   memset((void *)input,0,1024*sizeof(__fp16));
-   memset((void *)weights,0,1024*sizeof(__fp16));
-   memset((void *)output,0,1024*sizeof(__fp16));
+   memset((void *)input,0,1048576*sizeof(__fp16));
+   memset((void *)weights,0,1048576*sizeof(__fp16));
+   memset((void *)output,0,1048576*sizeof(__fp16));
  
    __fp16 *weights_fp16 = static_cast<__fp16*>(weights);
-   weights_fp16[0] = 20.0f;
-   weights_fp16[1] = 20.0f;
-   weights_fp16[2] = 10.0f;
-   weights_fp16[3] = 10.0f;
-   weights_fp16[4] = 10.0f;
-   weights_fp16[5] = 10.0f;
-   weights_fp16[6] = 10.0f;
-   weights_fp16[7] = 10.0f;
-   weights_fp16[8] = 10.0f;
-   weights_fp16[9] = 10.0f;
-   
+   for (int i = 0; i < 1048576; ++i) {
+       weights_fp16[i] = 10.0f;
+   }
 
    __fp16 *feature_data_fp16 = static_cast<__fp16*>(input);
-   feature_data_fp16[0] = 10.0f;
-   feature_data_fp16[1] = 10.0f;
-   feature_data_fp16[2] = 10.0f;
-   feature_data_fp16[3] = 10.0f;
-   feature_data_fp16[4] = 10.0f;
-   feature_data_fp16[5] = 10.0f;
-   feature_data_fp16[6] = 10.0f;
-   feature_data_fp16[7] = 10.0f;
-   feature_data_fp16[8] = 10.0f;
-   feature_data_fp16[9] = 10.0f;
-  
+   for (int i = 0; i < 1048576; ++i) {
+       feature_data_fp16[i] = 10.0f;
+   }
  
-   munmap(input,4096);
-   munmap(weights,4096);
+   munmap(input,4194304);
+   munmap(weights,4194304);
 
    struct rknpu_submit submit = {
      .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
@@ -358,16 +319,15 @@
      .user_data = 0,
      .core_mask = 1,
      .fence_fd = -1,
-     .subcore_task = {
-       { .task_start = 0, .task_number = 1 },
-       { .task_start = 1, .task_number = 1 },
-       { .task_start = 0, .task_number = 1 },
-       { .task_start = 1, .task_number = 1 },
-       { .task_start = 2, .task_number = 1 },
-     },
-     
+     .subcore_task = { // Only use core 1, nothing for core 2/3
+      {
+        .task_start = 0,
+        .task_number = 1,
+      }, { 1, 0}, {2, 0}
+    },
+   
    };
-   for (int i = 0; i < 9000; i++) {
+   for (int i = 0; i < 1; i++) {
     ret = ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, &submit);
     printf("RKNPU_SUBMIT returned %d\n", ret);
    }
@@ -376,7 +336,7 @@
    printf("=========================================================================================================\n");
    __fp16 *output_data = static_cast<__fp16*>(output);
    printf("Output data:\n");
-   for (size_t i = 0; i < 10; ++i) {
+   for (size_t i = 0; i < 50; ++i) {
        printf("%f ", output_data[i]);
    }
  
@@ -435,9 +395,9 @@
 
    munmap(regcmd,1024);
    munmap(tasks,1024);
-   munmap(input,4096);
-   munmap(weights,4096);
-   munmap(output,4096);
+   munmap(input,4194304);
+   munmap(weights,4194304);
+   munmap(output,4194304);
  
    mem_destroy(fd, regcmd_handle, regcmd_obj);
    mem_destroy(fd, tasks_handle, tasks_obj );
