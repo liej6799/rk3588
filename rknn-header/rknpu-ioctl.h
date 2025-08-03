@@ -287,7 +287,7 @@ struct rknpu_action {
 #define RKNPU_IOR(nr, type) _IOR(RKNPU_IOC_MAGIC, nr, type)
 #define RKNPU_IOWR(nr, type) _IOWR(RKNPU_IOC_MAGIC, nr, type)
 
-#include <drm/drm.h>
+#include <libdrm/drm.h>
 
 #define DRM_IOCTL_RKNPU_ACTION                                                 \
         DRM_IOWR(DRM_COMMAND_BASE + RKNPU_ACTION, struct rknpu_action)

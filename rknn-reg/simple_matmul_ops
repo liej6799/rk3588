@@ -1,0 +1,274 @@
+float4 merging axis : [(4, 16789504, 0, 4)]
+   0 Ops.DEFINE_GLOBAL   : dtypes.float.ptr(16777216)     []                               0
+   1 Ops.DEFINE_GLOBAL   : dtypes.float.ptr(16777216)     []                               1
+   2 Ops.DEFINE_GLOBAL   : dtypes.float.ptr(16777216)     []                               2
+   3 Ops.SPECIAL         : dtypes.int                     []                               ('gidx0', 64)
+   4 Ops.SPECIAL         : dtypes.int                     []                               ('gidx1', 128)
+   5 Ops.SPECIAL         : dtypes.int                     []                               ('lidx0', 8)
+   6 Ops.SPECIAL         : dtypes.int                     []                               ('lidx1', 16)
+   7 Ops.CONST           : dtypes.float                   []                               0.0
+   8 Ops.CONST           : dtypes.int                     []                               2
+   9 Ops.CONST           : dtypes.int                     []                               6
+  10 Ops.CONST           : dtypes.int                     []                               14
+  11 Ops.CONST           : dtypes.int                     []                               17
+  12 Ops.CONST           : dtypes.int                     []                               1024
+  13 Ops.CONST           : dtypes.int                     []                               4096
+  14 Ops.CONST           : dtypes.int                     []                               8192
+  15 Ops.CONST           : dtypes.int                     []                               12288
+  16 Ops.SHL             : dtypes.int                     [6, '2']                         None
+  17 Ops.SHL             : dtypes.int                     [3, '6']                         None
+  18 Ops.SHL             : dtypes.int                     [5, '14']                        None
+  19 Ops.SHL             : dtypes.int                     [4, '17']                        None
+  20 Ops.ADD             : dtypes.int                     [17, 16]                         None
+  21 Ops.ADD             : dtypes.int                     [19, 18]                         None
+  22 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 0)
+  23 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 1)
+  24 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 2)
+  25 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 3)
+  26 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 4)
+  27 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 5)
+  28 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 6)
+  29 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 7)
+  30 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 8)
+  31 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 9)
+  32 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 10)
+  33 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 11)
+  34 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 12)
+  35 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 13)
+  36 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 14)
+  37 Ops.DEFINE_REG      : dtypes.float                   ['0.0', 38]                      (0, 15)
+  38 Ops.RANGE           : dtypes.int                     ['1024']                         4
+  39 Ops.SHL             : dtypes.int                     [38, '2']                        None
+  40 Ops.ADD             : dtypes.int                     [21, 39]                         None
+  41 Ops.INDEX           : dtypes.float.ptr(16777216)     [1, 40]                          None
+  42 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [41]                             None
+  43 Ops.LOAD            : dtypes.float.vec(4)            [42]                             None
+  44 Ops.ADD             : dtypes.int                     [40, '4096']                     None
+  45 Ops.INDEX           : dtypes.float.ptr(16777216)     [1, 44]                          None
+  46 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [45]                             None
+  47 Ops.LOAD            : dtypes.float.vec(4)            [46]                             None
+  48 Ops.ADD             : dtypes.int                     [40, '8192']                     None
+  49 Ops.INDEX           : dtypes.float.ptr(16777216)     [1, 48]                          None
+  50 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [49]                             None
+  51 Ops.LOAD            : dtypes.float.vec(4)            [50]                             None
+  52 Ops.ADD             : dtypes.int                     [40, '12288']                    None
+  53 Ops.INDEX           : dtypes.float.ptr(16777216)     [1, 52]                          None
+  54 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [53]                             None
+  55 Ops.LOAD            : dtypes.float.vec(4)            [54]                             None
+  56 Ops.SHL             : dtypes.int                     [38, '14']                       None
+  57 Ops.ADD             : dtypes.int                     [20, 56]                         None
+  58 Ops.INDEX           : dtypes.float.ptr(16777216)     [2, 57]                          None
+  59 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [58]                             None
+  60 Ops.LOAD            : dtypes.float.vec(4)            [59]                             None
+  61 Ops.ADD             : dtypes.int                     [57, '4096']                     None
+  62 Ops.INDEX           : dtypes.float.ptr(16777216)     [2, 61]                          None
+  63 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [62]                             None
+  64 Ops.LOAD            : dtypes.float.vec(4)            [63]                             None
+  65 Ops.ADD             : dtypes.int                     [57, '8192']                     None
+  66 Ops.INDEX           : dtypes.float.ptr(16777216)     [2, 65]                          None
+  67 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [66]                             None
+  68 Ops.LOAD            : dtypes.float.vec(4)            [67]                             None
+  69 Ops.ADD             : dtypes.int                     [57, '12288']                    None
+  70 Ops.INDEX           : dtypes.float.ptr(16777216)     [2, 69]                          None
+  71 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [70]                             None
+  72 Ops.LOAD            : dtypes.float.vec(4)            [71]                             None
+  73 Ops.GEP             : dtypes.float                   [47]                             (0,)
+  74 Ops.GEP             : dtypes.float                   [51]                             (0,)
+  75 Ops.GEP             : dtypes.float                   [55]                             (0,)
+  76 Ops.GEP             : dtypes.float                   [43]                             (0,)
+  77 Ops.GEP             : dtypes.float                   [64]                             (0,)
+  78 Ops.GEP             : dtypes.float                   [68]                             (0,)
+  79 Ops.GEP             : dtypes.float                   [72]                             (0,)
+  80 Ops.GEP             : dtypes.float                   [60]                             (0,)
+  81 Ops.GEP             : dtypes.float                   [47]                             (1,)
+  82 Ops.GEP             : dtypes.float                   [51]                             (1,)
+  83 Ops.GEP             : dtypes.float                   [55]                             (1,)
+  84 Ops.GEP             : dtypes.float                   [43]                             (1,)
+  85 Ops.GEP             : dtypes.float                   [64]                             (1,)
+  86 Ops.GEP             : dtypes.float                   [68]                             (1,)
+  87 Ops.GEP             : dtypes.float                   [72]                             (1,)
+  88 Ops.GEP             : dtypes.float                   [60]                             (1,)
+  89 Ops.GEP             : dtypes.float                   [47]                             (2,)
+  90 Ops.GEP             : dtypes.float                   [51]                             (2,)
+  91 Ops.GEP             : dtypes.float                   [55]                             (2,)
+  92 Ops.GEP             : dtypes.float                   [43]                             (2,)
+  93 Ops.GEP             : dtypes.float                   [64]                             (2,)
+  94 Ops.GEP             : dtypes.float                   [68]                             (2,)
+  95 Ops.GEP             : dtypes.float                   [72]                             (2,)
+  96 Ops.GEP             : dtypes.float                   [60]                             (2,)
+  97 Ops.GEP             : dtypes.float                   [47]                             (3,)
+  98 Ops.GEP             : dtypes.float                   [51]                             (3,)
+  99 Ops.GEP             : dtypes.float                   [55]                             (3,)
+ 100 Ops.GEP             : dtypes.float                   [43]                             (3,)
+ 101 Ops.GEP             : dtypes.float                   [64]                             (3,)
+ 102 Ops.GEP             : dtypes.float                   [68]                             (3,)
+ 103 Ops.GEP             : dtypes.float                   [72]                             (3,)
+ 104 Ops.GEP             : dtypes.float                   [60]                             (3,)
+ 105 Ops.MUL             : dtypes.float                   [73, 80]                         None
+ 106 Ops.ADD             : dtypes.float                   [23, 105]                        None
+ 107 Ops.MUL             : dtypes.float                   [73, 88]                         None
+ 108 Ops.ADD             : dtypes.float                   [27, 107]                        None
+ 109 Ops.MUL             : dtypes.float                   [73, 96]                         None
+ 110 Ops.ADD             : dtypes.float                   [31, 109]                        None
+ 111 Ops.MUL             : dtypes.float                   [73, 104]                        None
+ 112 Ops.ADD             : dtypes.float                   [35, 111]                        None
+ 113 Ops.MUL             : dtypes.float                   [74, 80]                         None
+ 114 Ops.ADD             : dtypes.float                   [24, 113]                        None
+ 115 Ops.MUL             : dtypes.float                   [74, 88]                         None
+ 116 Ops.ADD             : dtypes.float                   [28, 115]                        None
+ 117 Ops.MUL             : dtypes.float                   [74, 96]                         None
+ 118 Ops.ADD             : dtypes.float                   [32, 117]                        None
+ 119 Ops.MUL             : dtypes.float                   [74, 104]                        None
+ 120 Ops.ADD             : dtypes.float                   [36, 119]                        None
+ 121 Ops.MUL             : dtypes.float                   [75, 80]                         None
+ 122 Ops.ADD             : dtypes.float                   [25, 121]                        None
+ 123 Ops.MUL             : dtypes.float                   [75, 88]                         None
+ 124 Ops.ADD             : dtypes.float                   [29, 123]                        None
+ 125 Ops.MUL             : dtypes.float                   [75, 96]                         None
+ 126 Ops.ADD             : dtypes.float                   [33, 125]                        None
+ 127 Ops.MUL             : dtypes.float                   [75, 104]                        None
+ 128 Ops.ADD             : dtypes.float                   [37, 127]                        None
+ 129 Ops.MUL             : dtypes.float                   [76, 80]                         None
+ 130 Ops.ADD             : dtypes.float                   [22, 129]                        None
+ 131 Ops.MUL             : dtypes.float                   [76, 88]                         None
+ 132 Ops.ADD             : dtypes.float                   [26, 131]                        None
+ 133 Ops.MUL             : dtypes.float                   [76, 96]                         None
+ 134 Ops.ADD             : dtypes.float                   [30, 133]                        None
+ 135 Ops.MUL             : dtypes.float                   [76, 104]                        None
+ 136 Ops.ADD             : dtypes.float                   [34, 135]                        None
+ 137 Ops.MUL             : dtypes.float                   [81, 77]                         None
+ 138 Ops.ADD             : dtypes.float                   [106, 137]                       None
+ 139 Ops.MUL             : dtypes.float                   [81, 85]                         None
+ 140 Ops.ADD             : dtypes.float                   [108, 139]                       None
+ 141 Ops.MUL             : dtypes.float                   [81, 93]                         None
+ 142 Ops.ADD             : dtypes.float                   [110, 141]                       None
+ 143 Ops.MUL             : dtypes.float                   [81, 101]                        None
+ 144 Ops.ADD             : dtypes.float                   [112, 143]                       None
+ 145 Ops.MUL             : dtypes.float                   [82, 77]                         None
+ 146 Ops.ADD             : dtypes.float                   [114, 145]                       None
+ 147 Ops.MUL             : dtypes.float                   [82, 85]                         None
+ 148 Ops.ADD             : dtypes.float                   [116, 147]                       None
+ 149 Ops.MUL             : dtypes.float                   [82, 93]                         None
+ 150 Ops.ADD             : dtypes.float                   [118, 149]                       None
+ 151 Ops.MUL             : dtypes.float                   [82, 101]                        None
+ 152 Ops.ADD             : dtypes.float                   [120, 151]                       None
+ 153 Ops.MUL             : dtypes.float                   [83, 77]                         None
+ 154 Ops.ADD             : dtypes.float                   [122, 153]                       None
+ 155 Ops.MUL             : dtypes.float                   [83, 85]                         None
+ 156 Ops.ADD             : dtypes.float                   [124, 155]                       None
+ 157 Ops.MUL             : dtypes.float                   [83, 93]                         None
+ 158 Ops.ADD             : dtypes.float                   [126, 157]                       None
+ 159 Ops.MUL             : dtypes.float                   [83, 101]                        None
+ 160 Ops.ADD             : dtypes.float                   [128, 159]                       None
+ 161 Ops.MUL             : dtypes.float                   [84, 77]                         None
+ 162 Ops.ADD             : dtypes.float                   [130, 161]                       None
+ 163 Ops.MUL             : dtypes.float                   [84, 85]                         None
+ 164 Ops.ADD             : dtypes.float                   [132, 163]                       None
+ 165 Ops.MUL             : dtypes.float                   [84, 93]                         None
+ 166 Ops.ADD             : dtypes.float                   [134, 165]                       None
+ 167 Ops.MUL             : dtypes.float                   [84, 101]                        None
+ 168 Ops.ADD             : dtypes.float                   [136, 167]                       None
+ 169 Ops.MUL             : dtypes.float                   [89, 78]                         None
+ 170 Ops.ADD             : dtypes.float                   [138, 169]                       None
+ 171 Ops.MUL             : dtypes.float                   [89, 86]                         None
+ 172 Ops.ADD             : dtypes.float                   [140, 171]                       None
+ 173 Ops.MUL             : dtypes.float                   [89, 94]                         None
+ 174 Ops.ADD             : dtypes.float                   [142, 173]                       None
+ 175 Ops.MUL             : dtypes.float                   [89, 102]                        None
+ 176 Ops.ADD             : dtypes.float                   [144, 175]                       None
+ 177 Ops.MUL             : dtypes.float                   [90, 78]                         None
+ 178 Ops.ADD             : dtypes.float                   [146, 177]                       None
+ 179 Ops.MUL             : dtypes.float                   [90, 86]                         None
+ 180 Ops.ADD             : dtypes.float                   [148, 179]                       None
+ 181 Ops.MUL             : dtypes.float                   [90, 94]                         None
+ 182 Ops.ADD             : dtypes.float                   [150, 181]                       None
+ 183 Ops.MUL             : dtypes.float                   [90, 102]                        None
+ 184 Ops.ADD             : dtypes.float                   [152, 183]                       None
+ 185 Ops.MUL             : dtypes.float                   [91, 78]                         None
+ 186 Ops.ADD             : dtypes.float                   [154, 185]                       None
+ 187 Ops.MUL             : dtypes.float                   [91, 86]                         None
+ 188 Ops.ADD             : dtypes.float                   [156, 187]                       None
+ 189 Ops.MUL             : dtypes.float                   [91, 94]                         None
+ 190 Ops.ADD             : dtypes.float                   [158, 189]                       None
+ 191 Ops.MUL             : dtypes.float                   [91, 102]                        None
+ 192 Ops.ADD             : dtypes.float                   [160, 191]                       None
+ 193 Ops.MUL             : dtypes.float                   [92, 78]                         None
+ 194 Ops.ADD             : dtypes.float                   [162, 193]                       None
+ 195 Ops.MUL             : dtypes.float                   [92, 86]                         None
+ 196 Ops.ADD             : dtypes.float                   [164, 195]                       None
+ 197 Ops.MUL             : dtypes.float                   [92, 94]                         None
+ 198 Ops.ADD             : dtypes.float                   [166, 197]                       None
+ 199 Ops.MUL             : dtypes.float                   [92, 102]                        None
+ 200 Ops.ADD             : dtypes.float                   [168, 199]                       None
+ 201 Ops.MUL             : dtypes.float                   [97, 79]                         None
+ 202 Ops.ADD             : dtypes.float                   [170, 201]                       None
+ 203 Ops.ASSIGN          : dtypes.float                   [23, 202]                        None
+ 204 Ops.MUL             : dtypes.float                   [97, 87]                         None
+ 205 Ops.ADD             : dtypes.float                   [172, 204]                       None
+ 206 Ops.ASSIGN          : dtypes.float                   [27, 205]                        None
+ 207 Ops.MUL             : dtypes.float                   [97, 95]                         None
+ 208 Ops.ADD             : dtypes.float                   [174, 207]                       None
+ 209 Ops.ASSIGN          : dtypes.float                   [31, 208]                        None
+ 210 Ops.MUL             : dtypes.float                   [97, 103]                        None
+ 211 Ops.ADD             : dtypes.float                   [176, 210]                       None
+ 212 Ops.ASSIGN          : dtypes.float                   [35, 211]                        None
+ 213 Ops.MUL             : dtypes.float                   [98, 79]                         None
+ 214 Ops.ADD             : dtypes.float                   [178, 213]                       None
+ 215 Ops.ASSIGN          : dtypes.float                   [24, 214]                        None
+ 216 Ops.MUL             : dtypes.float                   [98, 87]                         None
+ 217 Ops.ADD             : dtypes.float                   [180, 216]                       None
+ 218 Ops.ASSIGN          : dtypes.float                   [28, 217]                        None
+ 219 Ops.MUL             : dtypes.float                   [98, 95]                         None
+ 220 Ops.ADD             : dtypes.float                   [182, 219]                       None
+ 221 Ops.ASSIGN          : dtypes.float                   [32, 220]                        None
+ 222 Ops.MUL             : dtypes.float                   [98, 103]                        None
+ 223 Ops.ADD             : dtypes.float                   [184, 222]                       None
+ 224 Ops.ASSIGN          : dtypes.float                   [36, 223]                        None
+ 225 Ops.MUL             : dtypes.float                   [99, 79]                         None
+ 226 Ops.ADD             : dtypes.float                   [186, 225]                       None
+ 227 Ops.ASSIGN          : dtypes.float                   [25, 226]                        None
+ 228 Ops.MUL             : dtypes.float                   [99, 87]                         None
+ 229 Ops.ADD             : dtypes.float                   [188, 228]                       None
+ 230 Ops.ASSIGN          : dtypes.float                   [29, 229]                        None
+ 231 Ops.MUL             : dtypes.float                   [99, 95]                         None
+ 232 Ops.ADD             : dtypes.float                   [190, 231]                       None
+ 233 Ops.ASSIGN          : dtypes.float                   [33, 232]                        None
+ 234 Ops.MUL             : dtypes.float                   [99, 103]                        None
+ 235 Ops.ADD             : dtypes.float                   [192, 234]                       None
+ 236 Ops.ASSIGN          : dtypes.float                   [37, 235]                        None
+ 237 Ops.MUL             : dtypes.float                   [100, 79]                        None
+ 238 Ops.ADD             : dtypes.float                   [194, 237]                       None
+ 239 Ops.ASSIGN          : dtypes.float                   [22, 238]                        None
+ 240 Ops.MUL             : dtypes.float                   [100, 87]                        None
+ 241 Ops.ADD             : dtypes.float                   [196, 240]                       None
+ 242 Ops.ASSIGN          : dtypes.float                   [26, 241]                        None
+ 243 Ops.MUL             : dtypes.float                   [100, 95]                        None
+ 244 Ops.ADD             : dtypes.float                   [198, 243]                       None
+ 245 Ops.ASSIGN          : dtypes.float                   [30, 244]                        None
+ 246 Ops.MUL             : dtypes.float                   [100, 103]                       None
+ 247 Ops.ADD             : dtypes.float                   [200, 246]                       None
+ 248 Ops.ASSIGN          : dtypes.float                   [34, 247]                        None
+ 249 Ops.ENDRANGE        : dtypes.void                    [38]                             None
+ 250 Ops.VECTORIZE       : dtypes.float.vec(4)            [239, 242, 245, 248]             None
+ 251 Ops.VECTORIZE       : dtypes.float.vec(4)            [203, 206, 209, 212]             None
+ 252 Ops.VECTORIZE       : dtypes.float.vec(4)            [215, 218, 221, 224]             None
+ 253 Ops.VECTORIZE       : dtypes.float.vec(4)            [227, 230, 233, 236]             None
+ 254 Ops.ADD             : dtypes.int                     [17, 19]                         None
+ 255 Ops.ADD             : dtypes.int                     [254, 18]                        None
+ 256 Ops.ADD             : dtypes.int                     [255, 16]                        None
+ 257 Ops.INDEX           : dtypes.float.ptr(16777216)     [0, 256]                         None
+ 258 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [257]                            None
+ 259 Ops.STORE           : dtypes.void                    [258, 250]                       None
+ 260 Ops.ADD             : dtypes.int                     [256, '4096']                    None
+ 261 Ops.INDEX           : dtypes.float.ptr(16777216)     [0, 260]                         None
+ 262 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [261]                            None
+ 263 Ops.STORE           : dtypes.void                    [262, 251]                       None
+ 264 Ops.ADD             : dtypes.int                     [256, '8192']                    None
+ 265 Ops.INDEX           : dtypes.float.ptr(16777216)     [0, 264]                         None
+ 266 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [265]                            None
+ 267 Ops.STORE           : dtypes.void                    [266, 252]                       None
+ 268 Ops.ADD             : dtypes.int                     [256, '12288']                   None
+ 269 Ops.INDEX           : dtypes.float.ptr(16777216)     [0, 268]                         None
+ 270 Ops.CAST            : dtypes.float.vec(4).ptr(16777216) [269]                            None
+ 271 Ops.STORE           : dtypes.void                    [270, 253]                       None
+ 272 Ops.SINK            : dtypes.void                    [259, 263, 267, 271]             KernelInfo(name='r_\x1b[34m128\x1b[0m\x1b[90m_\x1b[0m\x1b[34m64\x1b[0m\x1b[90m_\x1b[0m\x1b[36m8\x1b[0m\x1b[90m_\x1b[0m\x1b[36m16\x1b[0m\x1b[90m_\x1b[0m\x1b[31m1024\x1b[0m\x1b[90m_\x1b[0m\x1b[33m4\x1b[0m\x1b[90m_\x1b[0m\x1b[33m4\x1b[0m\x1b[90m_\x1b[0m\x1b[35m4\x1b[0m\x1b[90m\x1b[0m', global_dims=2, local_dims=2, upcasted=3, dont_use_locals=False, applied_opts=(Opt(op=OptOps.UPCAST, axis=1, arg=4), Opt(op=OptOps.UPCAST, axis=0, arg=4), Opt(op=OptOps.UNROLL, axis=0, arg=4), Opt(op=OptOps.LOCAL, axis=0, arg=8), Opt(op=OptOps.LOCAL, axis=1, arg=16)), opts_to_apply=None)
