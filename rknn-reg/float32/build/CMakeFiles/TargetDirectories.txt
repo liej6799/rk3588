@@ -1,0 +1,7 @@
+/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles/float32add.dir
+/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles/edit_cache.dir
+/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles/rebuild_cache.dir
+/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles/list_install_components.dir
+/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles/install.dir
+/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles/install/local.dir
+/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles/install/strip.dir
