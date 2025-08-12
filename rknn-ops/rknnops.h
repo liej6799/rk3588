@@ -23,14 +23,55 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <typeinfo>
-
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/mman.h>
+#include <math.h>
+#include <vector>
 #include <libdrm/drm.h>
 #include "rknpu-ioctl.h"
 #include "rknn_api.h"
+#include "rkt_registers.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+std::vector<uint64_t> Q = {};
+void push(uint64_t q){
+    Q.push_back(q);
+}
+
+static void
+emit_raw(uint32_t target, uint32_t reg,
+         uint64_t value)
+{
+   uint64_t packed_value = 0;
+   packed_value = ((uint64_t)target) << 48;
+   packed_value |= ((uint64_t)value) << 16;
+   packed_value |= (uint64_t)reg;
+
+   printf("packed_value123: 0x%016llx\n", packed_value);
+   printf("target: 0x%08x\n", target);
+   printf("reg: 0x%08x\n", reg);
+   printf("value: %d\n", value);
+
+   push(packed_value);
+}
+
+static void
+emit(uint32_t reg, uint64_t value)
+{
+   uint32_t target = rkt_get_target(reg) + 0x1;
+   emit_raw(target, reg, value);
+}
+
+#define EMIT(offset, value) emit(offset, value);
+
 
 /* ============================================================================
  * RK3588 NPU Operations Library
@@ -43,7 +84,8 @@ extern "C" {
  * Basic Data Types and Operations
  * ============================================================================ */
 
- 
+
+
  struct MemHandles {
     void* input;
     void* weights;
@@ -125,33 +167,25 @@ int get_type_size(rknn_tensor_type type){
  
  uint64_t npu_regs[] = {
     0x10010000000e4004, // 0
-    0x20010000000e5004, // 1
     0x1001000001e5400c, // 2
     0x1001480000024010, // 3
-    0x1001000000004014, // 4
-    0x1001000000004020, // 5
-    0x1001000000c04024, // 6
-    0x1001000000094030, // 7
-    0x1001000000004034, // 8
-    0x1001000000004038, // 9
     0x100100070007403c, // 10
     0x1001000000534040, // 11
-    0x1001000000004044, // 12
-    0x1001000000004048, // 13
-    0x100100000000404c, // 14
     0x1001000000024050, // 15
     0x1001000000004054, // 16
     0x1001000000074058, // 17
     0x100100000009405c, // 18
     0x1001000000534060, // 19
-    0x1001000000004064, // 20
+    0x1001000000004064, // 20 
     0x1001000000004068, // 21
     0x100100000000406c, // 22
+
     0x1001108202c04070, // 23 // 0x1001108003c44070 0x1001108202c04070 0x1001108402c04070
     0x1001000000004074, // 24
     0x1001000000014078, // 25
     0x100100000000407c, // 26
     0x1001000000004080, // 27
+
     0x1001000100014084, // 28
     0x1001000000004088, // 29
     0x1001000000004090, // 30
@@ -209,6 +243,12 @@ int getDeviceFd()
     return fd;  
 }
 
+void boilerplate()
+{
+
+}
+
+
 MemHandles createRegCmd(int fd, int type_size)
 {
     uint64_t tasks_dma, tasks_obj;
@@ -230,10 +270,149 @@ MemHandles createRegCmd(int fd, int type_size)
     // Example: define a struct to hold them and return it.
     // Set input, weights and output physical memory locations. Note limited to 
     // a 32 bit address size (4GB)
-    npu_regs[55] = npu_regs[55] | ((input_dma & 0xFFFFFFFF) <<16);
-    npu_regs[61] = npu_regs[61] | ((weights_dma & 0xFFFFFFFF)  <<16);
-    npu_regs[5] = npu_regs[5] | ((output_dma & 0xFFFFFFFF) <<16);
+   
+    EMIT(REG_DPU_S_POINTER, DPU_S_POINTER_POINTER_PP_MODE(1) |
+    DPU_S_POINTER_EXECUTER_PP_EN(1) |
+    DPU_S_POINTER_POINTER_PP_EN(1));
 
+    EMIT(REG_DPU_FEATURE_MODE_CFG, DPU_FEATURE_MODE_CFG_BURST_LEN(0xF) |
+    DPU_FEATURE_MODE_CFG_CONV_MODE(0) |
+    DPU_FEATURE_MODE_CFG_OUTPUT_MODE(0x2) |
+    DPU_FEATURE_MODE_CFG_FLYING_MODE(0x1));
+
+    EMIT(REG_DPU_DATA_FORMAT, DPU_DATA_FORMAT_OUT_PRECISION(2) |
+    DPU_DATA_FORMAT_IN_PRECISION(2) |
+    DPU_DATA_FORMAT_PROC_PRECISION(2));
+
+    EMIT(REG_DPU_EW_CFG, DPU_EW_CFG_EW_CVT_TYPE(0) |
+    DPU_EW_CFG_EW_DATA_MODE(1) |
+    DPU_EW_CFG_EDATA_SIZE(2) |
+    DPU_EW_CFG_EW_ALU_ALGO(2) |
+    DPU_EW_CFG_EW_RELU_BYPASS(0) |
+    DPU_EW_CFG_EW_LUT_BYPASS(0) |
+    DPU_EW_CFG_EW_OP_SRC(0));
+
+    EMIT(REG_DPU_DATA_CUBE_CHANNEL, DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL(7) |
+    DPU_DATA_CUBE_CHANNEL_CHANNEL(7));
+
+    EMIT(REG_DPU_BS_OW_CFG, DPU_BS_OW_CFG_OD_BYPASS(1));
+    EMIT(REG_DPU_BS_OW_OP, DPU_BS_OW_OP_OW_OP(0));
+
+     //0x1001108202c04070
+     EMIT(REG_DPU_BS_CFG, DPU_BS_CFG_BS_ALU_ALGO(0) | DPU_BS_CFG_BS_ALU_SRC(0) |
+     DPU_BS_CFG_BS_RELUX_EN(0) |
+     DPU_BS_CFG_BS_RELU_BYPASS(1) |
+     DPU_BS_CFG_BS_MUL_PRELU(0) |
+     DPU_BS_CFG_BS_MUL_BYPASS(1) |
+     DPU_BS_CFG_BS_ALU_BYPASS(1) | 
+     DPU_BS_CFG_BS_BYPASS(1));
+
+    
+    EMIT(REG_DPU_WDMA_SIZE_0,
+    DPU_WDMA_SIZE_0_CHANNEL_WDMA(7));
+
+    EMIT(REG_DPU_WDMA_SIZE_1,
+    DPU_WDMA_SIZE_1_HEIGHT_WDMA(0) | DPU_WDMA_SIZE_1_WIDTH_WDMA(9));
+
+    EMIT(REG_DPU_BN_CFG,
+    DPU_BN_CFG_BN_RELU_BYPASS(1) | DPU_BN_CFG_BN_MUL_BYPASS(1) |
+    DPU_BN_CFG_BN_ALU_BYPASS(1) | DPU_BN_CFG_BN_BYPASS(1));
+
+    EMIT(REG_DPU_BN_ALU_CFG,0);    
+    EMIT(REG_DPU_BN_MUL_CFG,0);    
+    EMIT(REG_DPU_BN_RELUX_CMP_VALUE, 0)
+
+    //0x1001108202c04070
+    EMIT(REG_DPU_EW_CFG,
+        DPU_EW_CFG_EW_CVT_TYPE(0) | DPU_EW_CFG_EW_DATA_MODE(1) |
+           DPU_EW_CFG_EDATA_SIZE(2) | DPU_EW_CFG_EW_ALU_ALGO(2) |
+           DPU_EW_CFG_EW_RELU_BYPASS(1) | DPU_EW_CFG_EW_LUT_BYPASS(1) |
+           DPU_EW_CFG_EW_OP_SRC(1));
+
+
+    float addition_scale = 0.0;
+    float add_scale = 0.0;
+    if (fabs(addition_scale - 0.090192) < 0.00001) {
+       add_scale = 299.671889248;
+    } else if (fabs(addition_scale - 0.399250) < 0.00001) {
+       add_scale = 1326.499209406;
+    } else if (fabs(addition_scale - 0.364902) < 0.00001) {
+       add_scale = 780.34375;
+    } else if (fabs(addition_scale - 0.422037) < 0.00001) {
+       add_scale = 715.5625;
+    } else if (fabs(addition_scale - 0.213016) < 0.00001) {
+       add_scale = 564.6875;
+    } else if (fabs(addition_scale - 0.244231) < 0.00001) {
+       add_scale = 499.796875;
+    } else if (fabs(addition_scale - 0.283416) < 0.00001) {
+       add_scale = 488.203125;
+    } else if (fabs(addition_scale - 0.171151) < 0.00001) {
+       add_scale = 602.90625;
+    } else if (fabs(addition_scale - 0.164588) < 0.00001) {
+       add_scale = 271.921875;
+    } else if (fabs(addition_scale - 0.204098) < 0.00001) {
+       add_scale = 262.90625;
+    } else if (fabs(addition_scale - 0.116532) < 0.00001) {
+       add_scale = 450.140625;
+    } else if (fabs(addition_scale - 0.134499) < 0.00001) {
+       add_scale = 212.1953125;
+    } else if (fabs(addition_scale - 0.220141) < 0.00001) {
+       add_scale = 368.28125;
+    } else if (fabs(addition_scale - 0.094560) < 0.00001) {
+       add_scale = 416.421875;
+    } else if (fabs(addition_scale - 0.093230) < 0.00001) {
+       add_scale = 305.421875;
+    } else if (fabs(addition_scale - 0.100618) < 0.00001) {
+       add_scale = 313.671875;
+    } else {
+       add_scale = 0.0;
+    }
+    
+    
+    uint32_t add_scale_bits = static_cast<uint32_t>(std::round(add_scale));
+    printf("add_scale_bits: %d\n", add_scale_bits);
+
+    unsigned add_shift = 127 + 31 - 32 - (add_scale_bits >> 23) + 16;
+
+    unsigned scale = ((add_scale_bits >> 9) & 0x7fff);
+    if (scale < 1 << 14)
+       scale |= 1 << 14;
+
+    //0x1001000000014078
+    EMIT(REG_DPU_EW_CVT_OFFSET_VALUE, 0);
+    EMIT(REG_DPU_EW_CVT_SCALE_VALUE, DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE(1));
+    EMIT(REG_DPU_EW_RELUX_CMP_VALUE, 0);
+    EMIT(REG_DPU_OUT_CVT_OFFSET, 0);
+
+
+    // 0x02000000
+    // 512 << 16 = 0x02000000
+    // x << 16 = 0x00010001
+      
+   uint64_t packed_value = 0;
+   uint64_t target = 0x1001;
+   uint64_t reg = 0x4084;
+   uint64_t value = 65537; // 0x00010001
+
+   packed_value = (target << 48) | (value << 16) | reg;
+
+    // Use PRIu64 or PRIx64 from inttypes.h for safe printing
+    printf("packed_value123: 0x%016llx\n", packed_value);
+
+
+    EMIT(REG_DPU_OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(value));
+
+    EMIT(REG_DPU_OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(1-1));
+    
+    npu_regs[55] = 0x2001000000005018 | ((input_dma & 0xFFFFFFFF) <<16);
+    npu_regs[61] = 0x2001000000005038 | ((weights_dma & 0xFFFFFFFF)  <<16);
+    npu_regs[5] = 0x1001000000004020 | ((output_dma & 0xFFFFFFFF) <<16);
+
+ 
+/**
+0x1001000100014084 = 0x00010001
+0x1001000002004084 = 0x00000200
+*/
         
     memcpy(regcmd,npu_regs,sizeof(npu_regs));
 

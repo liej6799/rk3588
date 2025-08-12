@@ -20,7 +20,28 @@
 #include "rknpu-ioctl.h"
 #include "rkt_registers.h"
 
-#define NPUOP(op, value, reg) (((uint64_t)(op & 0xffff))<< 48) | ( ((uint64_t)(value & 0xffffffff)) << 16) | (uint64_t)(reg & 0xffff)
+
+static void
+emit_raw(struct util_dynarray *regs, uint32_t target, uint32_t reg,
+         uint32_t value)
+{
+   uint64_t packed_value = 0;
+   packed_value = ((uint64_t)target) << 48;
+   packed_value |= ((uint64_t)value) << 16;
+   packed_value |= (uint64_t)reg;
+
+   util_dynarray_append(regs, uint64_t, packed_value);
+
+}
+
+static void
+emit(struct util_dynarray *regs, uint32_t reg, uint32_t value)
+{
+   uint32_t target = rkt_get_target(reg) + 0x1;
+   emit_raw(regs, target, reg, value);
+}
+
+#define EMIT(offset, value) emit(regs, offset, value);
 
 // Magic number
 
