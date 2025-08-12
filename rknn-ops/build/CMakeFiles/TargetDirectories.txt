@@ -1,0 +1,7 @@
+/data/Dev/rk3588/rknn-ops/build/CMakeFiles/rknnops.dir
+/data/Dev/rk3588/rknn-ops/build/CMakeFiles/edit_cache.dir
+/data/Dev/rk3588/rknn-ops/build/CMakeFiles/rebuild_cache.dir
+/data/Dev/rk3588/rknn-ops/build/CMakeFiles/list_install_components.dir
+/data/Dev/rk3588/rknn-ops/build/CMakeFiles/install.dir
+/data/Dev/rk3588/rknn-ops/build/CMakeFiles/install/local.dir
+/data/Dev/rk3588/rknn-ops/build/CMakeFiles/install/strip.dir

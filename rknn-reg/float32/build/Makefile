@@ -174,6 +174,43 @@ float32add/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32add.dir/build.make CMakeFiles/float32add.dir/build
 .PHONY : float32add/fast
 
+#=============================================================================
+# Target rules for targets named float32addreg
+
+# Build rule for target.
+float32addreg: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 float32addreg
+.PHONY : float32addreg
+
+# fast build rule for target.
+float32addreg/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32addreg.dir/build.make CMakeFiles/float32addreg.dir/build
+.PHONY : float32addreg/fast
+
+float32.o: float32.cpp.o
+.PHONY : float32.o
+
+# target to build an object file
+float32.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32addreg.dir/build.make CMakeFiles/float32addreg.dir/float32.cpp.o
+.PHONY : float32.cpp.o
+
+float32.i: float32.cpp.i
+.PHONY : float32.i
+
+# target to preprocess a source file
+float32.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32addreg.dir/build.make CMakeFiles/float32addreg.dir/float32.cpp.i
+.PHONY : float32.cpp.i
+
+float32.s: float32.cpp.s
+.PHONY : float32.s
+
+# target to generate assembly for a file
+float32.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32addreg.dir/build.make CMakeFiles/float32addreg.dir/float32.cpp.s
+.PHONY : float32.cpp.s
+
 float32add.o: float32add.cpp.o
 .PHONY : float32add.o
 
@@ -211,6 +248,10 @@ help:
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
 	@echo "... float32add"
+	@echo "... float32addreg"
+	@echo "... float32.o"
+	@echo "... float32.i"
+	@echo "... float32.s"
 	@echo "... float32add.o"
 	@echo "... float32add.i"
 	@echo "... float32add.s"

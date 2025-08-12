@@ -23,11 +23,11 @@ static unsigned char *load_float32_data(rknn_tensor_attr *input_attr, int *input
     
     if (index == 0) {
         for (int i = 0; i < 10; ++i) {
-            test[i] = 5.5f;  // First input: all 5.5s
+            test[i] = 6.6f;  // First input: all 5.5s
         }
     } else if (index == 1) {
         for (int i = 0; i < 10; ++i) {
-            test[i] = 3.2f;  // Second input: all 3.2s
+            test[i] = 6.6f;  // Second input: all 3.2s
         }
     }
     
@@ -167,7 +167,7 @@ int main() {
     
     for (int i = 0; i < io_num.n_input; i++) {
         input_data[i] = NULL;
-        input_type[i] = RKNN_TENSOR_FLOAT32;
+        input_type[i] = RKNN_TENSOR_FLOAT16;
         input_layout[i] = RKNN_TENSOR_UNDEFINED;
         input_size[i] = input_attrs[i].n_elems * sizeof(float);
         type_bytes[i] = 4;
@@ -198,7 +198,7 @@ int main() {
     for (int i = 0; i < io_num.n_input; i++) {
         printf("Input %d: ", i);
         float* float_input = (float*)inputs[i].buf;
-        for (int j = 0; j < 10 && j < inputs[i].size/sizeof(float); j++) {
+        for (int j = 0; j < 1 && j < inputs[i].size/sizeof(float); j++) {
             printf("%.1f ", float_input[j]);
         }
         printf("\n");
@@ -264,7 +264,7 @@ int main() {
 
     
     
-    void *regmap2 = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, 3, 0x100001000);
+    void *regmap2 = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, 3, 0x100009000);
     printf("regmap2: %p\n", regmap2);
     if (regmap2 == MAP_FAILED) {
         perror("mmap regmap2 failed");

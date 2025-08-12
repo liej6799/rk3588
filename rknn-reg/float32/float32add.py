@@ -11,8 +11,8 @@ class Model(torch.nn.Module):
         
         
 # Create float32 tensors for testing
-x = torch.full((1, 10), 5.5, dtype=torch.float32)
-y = torch.full((1, 10), 3.2, dtype=torch.float32)
+x = torch.full((1, 10), 5.5, dtype=torch.float16)
+y = torch.full((1, 10), 3.2, dtype=torch.int32)
 
 print(f"Input x: {x}")
 print(f"Input y: {y}")

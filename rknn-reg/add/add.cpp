@@ -58,56 +58,27 @@ static unsigned char *load_npy(rknn_tensor_attr *input_attr, int *input_type, in
 {
 
 
-float* test = (float*)malloc(4096 * 4096 * sizeof(float));
+  __fp16 * test = (__fp16 *)malloc(1024 * sizeof(__fp16 ));
 
 if (index == 0) {
-  for (size_t i = 0; i < 4096 * 4096; ++i) {
-    test[i] = 10.0f;
+  for (size_t i = 0; i < 1024; ++i) {
+    test[i] = 5.5;
     }
 }
 
 if (index == 1) {
-  for (size_t i = 0; i < 4096 * 4096; ++i) {
-    test[i] = 10.0f;
+  for (size_t i = 0; i < 1024; ++i) {
+    test[i] = 6.6;
     }
 }
 
 // Dynamically allocate destination buffer
-float* data = (float*)malloc(4096 * 4096 * sizeof(float));
+__fp16* data = (__fp16*)malloc(1024 * sizeof(__fp16));
 
-// Copy the data
-//memcpy(data, test, 1048576 * sizeof(float)); // Does not hit SegFault
-memcpy(data, test, 4096 * 4096 * sizeof(float)); // Hit SegFault
-//memcpy(data, pr, 16777216);
-// memcpy(testData, reinterpret_cast<unsigned char*>(ptr), 16777216);
-
-// *input_size = npy_data.num_bytes();
-
-// for (int i = 0; i < 30; i++) 
-// {
-//   printf("DATA: %f ", float_data[i]);
-// }
-
-// // *input_size = 240;
-
-// std::cout << "Type of a: " << typeid(float_data).name() << std::endl;
-
-// std::cout << "Type of b: " << typeid(ptr).name() << std::endl;
-
-// std::cout << "size of a: " << sizeof(float_data) << std::endl;
-
-// std::cout << "size of b: " << sizeof(ptr) << std::endl;
-
-
-
-
-// float* Pf = test;  // Pf now points to the first element of A30_f
+memcpy(data, test, 1024  * sizeof(__fp16)); // Hit SegFault
 
 unsigned char* byte_data = (unsigned char*)data;
-printf("byte_data values: ");
-for (int i = 0; i < 10 * sizeof(float); ++i) {
-    printf("%02x ", byte_data[i]);
-}
+
 printf("\n");
 
 return byte_data;
@@ -309,9 +280,9 @@ int main() {
   int            type_bytes[io_num.n_input];
   for (int i = 0; i < io_num.n_input; i++) {
     input_data[i]   = NULL;
-    input_type[i]   = RKNN_TENSOR_FLOAT32;
+    input_type[i]   = RKNN_TENSOR_FLOAT16;
     input_layout[i] = RKNN_TENSOR_UNDEFINED;
-    input_size[i]   = input_attrs[i].n_elems * sizeof(float);
+    input_size[i]   = input_attrs[i].n_elems * sizeof(__fp16);  
     type_bytes[i] = 4;
   }
 
@@ -363,10 +334,25 @@ for (int i = 0; i < io_num.n_input; i++) {
   printf("Avg elapse Time = %.3fms\n", total_time / 1);
   printf("Avg FPS = %.3f\n", 1 * 1000.f / total_time);
 
+  
+  void *regmap2 = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, 3, 0x100001000);
+  printf("regmap2: %p\n", regmap2);
+  if (regmap2 == MAP_FAILED) {
+      perror("mmap regmap2 failed");
+  } else {
+    uint64_t npu_regs_map2[1024 / sizeof(uint64_t )];
+      memcpy(npu_regs_map2, regmap2, 1024);
+      for (int i = 0; i < 300; i++) {
+          printf("npu_regs_map2[%d]: 0x%016lx\n", i, npu_regs_map2[i]);
+      }
+      // It is good practice to unmap when done
+      munmap(regmap2, 1024);
+  }
+
   // Get output
   rknn_output outputs[io_num.n_output];
   memset(outputs, 0, io_num.n_output * sizeof(rknn_output));
-  for (uint32_t i = 0; i < io_num.n_output; ++i) {
+  for (uint64_t i = 0; i < io_num.n_output; ++i) {
     outputs[i].want_float  = 1;
     outputs[i].index       = i;
     outputs[i].is_prealloc = 0;
@@ -425,19 +411,6 @@ for (int i = 0; i < io_num.n_input; i++) {
     // }
 
 
-    void *regmap2 = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, 3, 0x100006000);
-    printf("regmap2: %p\n", regmap2);
-    if (regmap2 == MAP_FAILED) {
-        perror("mmap regmap2 failed");
-    } else {
-        int64_t npu_regs_map2[1024 / sizeof(int64_t)];
-        memcpy(npu_regs_map2, regmap2, 1024);
-        for (int i = 0; i < 300; i++) {
-            printf("npu_regs_map2[%d]: 0x%016lx\n", i, npu_regs_map2[i]);
-        }
-        // It is good practice to unmap when done
-        munmap(regmap2, 1024);
-    }
 
 
 

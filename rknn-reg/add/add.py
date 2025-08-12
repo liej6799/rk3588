@@ -7,11 +7,11 @@ class Model(torch.nn.Module):
 
     def forward(self, x, y):
         # Add operation between x and y
-        return torch.where(x > 0, x, y)
+        return x + y
         
         
-x = torch.full((4096, 4096), 1.0)
-y = torch.full((4096, 4096), 1.0)
+x = torch.full((1, 1024), 1, dtype=torch.float16)
+y = torch.full((1, 1024), 1, dtype=torch.float16)
 
 
 m = Model()
@@ -24,7 +24,7 @@ torch.onnx.export(m, (x, y), "add.onnx", opset_version=12)
 from rknn.api import RKNN
 rknn = RKNN()
 
-rknn.config( target_platform='rk3588')
+rknn.config( target_platform='rk3588' )
 rknn.load_onnx(model='add.onnx')
 
 ret = rknn.build(do_quantization=False, dataset=None)

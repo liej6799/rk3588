@@ -259,11 +259,6 @@
      exit(1);
    }
  
-   // Reset the NPU
-   struct rknpu_action act = {
-     .flags = RKNPU_ACT_RESET,
-   };
-   ioctl(fd, DRM_IOCTL_RKNPU_ACTION, &act);
  
    // Set input, weights and output physical memory locations. Note limited to 
    // a 32 bit address size (4GB)
@@ -295,12 +290,12 @@
  
    __fp16 *weights_fp16 = static_cast<__fp16*>(weights);
    for (int i = 0; i < 1048576; ++i) {
-       weights_fp16[i] = 10.0f;
+       weights_fp16[i] =6.6f;
    }
 
    __fp16 *feature_data_fp16 = static_cast<__fp16*>(input);
    for (int i = 0; i < 1048576; ++i) {
-       feature_data_fp16[i] = 10.0f;
+       feature_data_fp16[i] = 7.7f;
    }
  
    munmap(input,4194304);

@@ -64,6 +64,7 @@ CMAKE_BINARY_DIR = /data/Dev/rk3588/rknn-reg/float32/build
 
 # The main recursive "all" target.
 all: CMakeFiles/float32add.dir/all
+all: CMakeFiles/float32addreg.dir/all
 .PHONY : all
 
 # The main recursive "preinstall" target.
@@ -72,6 +73,7 @@ preinstall:
 
 # The main recursive "clean" target.
 clean: CMakeFiles/float32add.dir/clean
+clean: CMakeFiles/float32addreg.dir/clean
 .PHONY : clean
 
 #=============================================================================
@@ -99,6 +101,32 @@ float32add: CMakeFiles/float32add.dir/rule
 CMakeFiles/float32add.dir/clean:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32add.dir/build.make CMakeFiles/float32add.dir/clean
 .PHONY : CMakeFiles/float32add.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/float32addreg.dir
+
+# All Build rule for target.
+CMakeFiles/float32addreg.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32addreg.dir/build.make CMakeFiles/float32addreg.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32addreg.dir/build.make CMakeFiles/float32addreg.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles --progress-num=3,4 "Built target float32addreg"
+.PHONY : CMakeFiles/float32addreg.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/float32addreg.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/float32addreg.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /data/Dev/rk3588/rknn-reg/float32/build/CMakeFiles 0
+.PHONY : CMakeFiles/float32addreg.dir/rule
+
+# Convenience name for target.
+float32addreg: CMakeFiles/float32addreg.dir/rule
+.PHONY : float32addreg
+
+# clean rule for target.
+CMakeFiles/float32addreg.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/float32addreg.dir/build.make CMakeFiles/float32addreg.dir/clean
+.PHONY : CMakeFiles/float32addreg.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.

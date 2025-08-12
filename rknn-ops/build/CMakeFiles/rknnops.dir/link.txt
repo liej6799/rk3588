@@ -1,0 +1,1 @@
+/usr/bin/cc CMakeFiles/rknnops.dir/rknnops.c.o -o rknnops 

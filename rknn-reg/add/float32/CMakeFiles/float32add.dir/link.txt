@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wl,--allow-shlib-undefined -Wl,--allow-shlib-undefined CMakeFiles/float32add.dir/float32add.cpp.o -o float32add  -Wl,-rpath,/data/Dev/rk3588/rknn-reg/../rknn-header: /data/Dev/rk3588/rknn-reg/../rknn-header//librknnrt.so 

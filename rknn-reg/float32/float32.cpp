@@ -1,0 +1,367 @@
+/*
+ * Copyright (C) 2024  Jasbir Matharu, <jasjnuk@gmail.com>
+ *
+ * This file is part of rk3588-npu.
+ *
+ * rk3588-npu is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+
+ * rk3588-npu is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with rk3588-npu.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ */
+
+ #include <stdio.h>
+ #include <stdint.h>
+ #include <unistd.h>
+ #include <sys/ioctl.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <sys/mman.h>
+ 
+ #include <libdrm/drm.h>
+ 
+ #include "rknpu-ioctl.h"
+ 
+   // Test currently runs against kernel 5.10 haven't tested 6.1 kernel.
+ 
+
+ 
+   // Hand crafted register definitions for a simple fp 16 convolution which
+   // can be done with single NPU task because the input cube and weights are
+   // small. Feature data is 4x1x40 and weights 1x1x40x16, output is 4x1x16.
+   // Note: numerous registers require changes if the input cube or weight
+   // dimensions are altered.
+
+   // Updated npu_regs[] to match the values from the latest npu_regs_map2 dump
+  
+   uint64_t npu_regs[] = {
+   0x10010000000e4004, // 0
+   0x20010000000e5004, // 1
+   0x1001000001e5400c, // 2
+   0x1001480000024010, // 3
+   0x1001000000004014, // 4
+   0x1001ffe820c04020, // 5
+   0x1001000000404024, // 6
+   0x1001000000014030, // 7
+   0x1001000000014034, // 8
+   0x1001000000004038, // 9
+   0x100100070007403c, // 10
+   0x1001000000534040, // 11
+   0x1001000000004044, // 12
+   0x1001000000004048, // 13
+   0x100100000000404c, // 14
+   0x1001000000024050, // 15
+   0x1001000000004054, // 16
+   0x1001000000074058, // 17
+   0x100100010001405c, // 18
+   0x1001000000534060, // 19
+   0x1001000000004064, // 20
+   0x1001000000004068, // 21
+   0x100100000000406c, // 22
+   0x1001000003834070, // 23 // 0x1001108003c44070 0x1001108202c04070 0x1001108402c04070
+   0x1001000000004074, // 24
+   0x1001000000014078, // 25
+   0x100100000000407c, // 26
+   0x1001000000004080, // 27
+   0x1001000100014084, // 28
+   0x1001000000004088, // 29
+   0x1001000000004090, // 30
+   0x1001000000004094, // 31
+   0x1001000000004098, // 32
+   0x100100000000409c, // 33
+   0x10010000000040a0, // 34
+   0x10010000000040a4, // 35
+   0x10010000000040a8, // 36
+   0x10010000000040ac, // 37
+   0x10010000004040c0, // 38
+   0x10010000000040c4, // 39
+   0x1001000000004100, // 40
+   0x1001000000004104, // 41
+   0x1001000000004108, // 42
+   0x100100000000410c, // 43
+   0x1001000000004110, // 44
+   0x1001000000004114, // 45
+   0x1001000000004118, // 46
+   0x100100000000411c, // 47
+   0x1001000000004120, // 48
+   0x1001000000004124, // 49
+   0x1001000000004128, // 50
+   0x100100000000412c, // 51
+   0x200100000001500c, // 52
+   0x2001000000015010, // 53
+   0x2001000000075014, // 54
+   0x2001ffe810005018, // 55
+   0x200100000000501c, // 56
+   0x2001000000005020, // 57
+   0x2001000000005028, // 58
+   0x200100000000502c, // 59
+   0x2001000000015034, // 60
+   0x2001000000005038, // 61
+   0x2001000000005040, // 62
+   0x2001000178495044, // 63
+   0x2001000000005048, // 64
+   0x200100000000504c, // 65
+   0x2001000000005064, // 66
+   0x2001010101015068, // 67
+   0x200100000000506c, // 68
+   0x0101ffe833400010, // 69
+   0x0101000000240014, // 70
+   0x0041000000000000, // 71
+   0x0081000000180008, // 72
+  
+  
+   };
+ 
+ int feature_data(int C, int H, int W, int C2, int c, int h, int w) {
+ 
+   int plane = (c-1)/C2;
+   int src = plane * H * W * C2;
+   int offset = (c-1) % C2;
+   int pos = src + C2 * ((h-1) * W + (w-1)) + offset;
+   return pos;
+ }
+ 
+ 
+ int weight_data(int K, int C, int k, int c) {
+ 
+   // fp16 format
+ 
+   int cpg=32;  
+   int kgs = (C/cpg)+1;  
+   int gi = ((c-1)/cpg)+1;
+   int C2_gs = ((C-1)/8)+1;
+   int c2_gs = ((c-1)/8)+1;
+   int c1_gs = ((c2_gs-1)/4);
+   int dst = c1_gs * 32 * K;
+   int rgs = (C2_gs)-(c1_gs*4);
+   int r=(c-1)%cpg;
+   if (gi == kgs) {
+     dst = dst + (rgs*8*(k-1));
+   } else {
+     dst = dst + (cpg*(k-1));
+   }
+   dst = dst + r;
+   return dst;
+ }	
+ 
+ void* mem_allocate(int fd, size_t size, uint64_t *dma_addr, uint64_t *obj, uint32_t flags, uint32_t *handle) {
+ 
+   int ret;
+   struct rknpu_mem_create mem_create = {
+     .flags = flags | RKNPU_MEM_NON_CACHEABLE,
+     .size = size,
+   };
+ 
+   ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, &mem_create);
+   if(ret < 0)  {
+     printf("RKNPU_MEM_CREATE failed %d\n",ret);
+     return NULL;
+   }
+ 
+   struct rknpu_mem_map mem_map = { .handle = mem_create.handle, .offset=0 };
+   ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, &mem_map);
+   if(ret < 0) {
+     printf("RKNPU_MEM_MAP failed %d\n",ret);
+     return NULL;
+   }	
+   void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mem_map.offset);
+ 
+   *dma_addr = mem_create.dma_addr;
+   *obj = mem_create.obj_addr;
+   *handle = mem_create.handle;
+   return map;
+ }
+ 
+ void mem_destroy(int fd, uint32_t handle, uint64_t obj_addr) {
+ 
+   int ret;
+   struct rknpu_mem_destroy destroy = {
+     .handle = handle ,
+     .obj_addr = obj_addr
+   };
+ 
+   ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_DESTROY, &destroy);
+   if (ret <0) {
+     printf("RKNPU_MEM_DESTROY failed %d\n",ret);
+   }
+ }
+ 
+ int main(int argc, char **argv) {
+ 
+   char buf1[256], buf2[256], buf3[256];
+   memset(buf1, 0, sizeof(buf1));
+   memset(buf2, 0, sizeof(buf2));
+   memset(buf3, 0, sizeof(buf3));
+ 
+   int ret;
+   int M=10;
+   int K=1;
+   int N=1;
+ 
+   // Open DRI called "rknpu"
+   int fd = open("/dev/dri/card1", O_RDWR);
+   if(fd<0) {
+     printf("Failed to open /dev/dri/card1 %d\n",errno);
+     exit(1);
+   }
+ 
+   struct drm_version dv;
+   memset(&dv, 0, sizeof(dv));
+   dv.name = buf1;
+   dv.name_len = sizeof(buf1);
+   dv.date = buf2;
+   dv.date_len = sizeof(buf2);
+   dv.desc = buf3;
+   dv.desc_len = sizeof(buf3);
+ 
+   ret = ioctl(fd, DRM_IOCTL_VERSION, &dv);
+   if (ret <0) {
+     printf("DRM_IOCTL_VERISON failed %d\n",ret);
+     exit(1);
+   }
+   printf("drm name is %s - %s - %s\n", dv.name, dv.date, dv.desc);
+ 
+   
+   uint64_t tasks_dma, tasks_obj;
+   uint32_t tasks_handle;
+   struct rknpu_task *tasks = static_cast<struct rknpu_task*>(mem_allocate(fd, 1024, &tasks_dma, &tasks_obj, RKNPU_MEM_KERNEL_MAPPING, &tasks_handle));
+ 
+  
+   uint64_t regcmd_dma, regcmd_obj;
+   uint32_t regcmd_handle;
+   uint64_t *regcmd = static_cast<uint64_t*>(mem_allocate(fd, 1024, &regcmd_dma, &regcmd_obj, 0, &regcmd_handle));
+
+   uint64_t input_dma, input_obj;
+   uint32_t input_handle;
+   void *input = mem_allocate(fd, 4194304, &input_dma, &input_obj, 0, &input_handle);
+ 
+   uint64_t weights_dma, weights_obj;
+   uint32_t weights_handle;
+   void *weights = mem_allocate(fd, 4194304, &weights_dma, &weights_obj, 0, &weights_handle);
+ 
+   uint64_t output_dma, output_obj;
+   uint32_t output_handle;
+   void *output = mem_allocate(fd, 4194304, &output_dma, &output_obj, 0, &output_handle);
+ 
+   printf("input dma is %lx, output dma is %lx, weights dma is %lx\n", input_dma, output_dma, weights_dma);
+   if ((regcmd == NULL) || (tasks == NULL) || (input == NULL) || (weights == NULL) || (output == NULL)) {
+     printf("Failed to allocate memory \n");
+     exit(1);
+   }
+ 
+   // Reset the NPU
+   struct rknpu_action act = {
+     .flags = RKNPU_ACT_RESET,
+   };
+   ioctl(fd, DRM_IOCTL_RKNPU_ACTION, &act);
+ 
+   // Set input, weights and output physical memory locations. Note limited to 
+   // a 32 bit address size (4GB)
+   npu_regs[55] = npu_regs[55] | ((input_dma & 0xFFFFFFFF) <<16);
+   npu_regs[61] = npu_regs[61] | ((weights_dma & 0xFFFFFFFF)  <<16);
+   npu_regs[5] = npu_regs[5] | ((output_dma & 0xFFFFFFFF) <<16);
+   printf("input_dma %lx\n", input_dma);
+   printf("weights_dma %lx\n", weights_dma);
+   printf("output_dma %lx\n", output_dma);
+   printf("npu_regs[55] %lx\n", npu_regs[55]);
+   printf("npu_regs[61] %lx\n", npu_regs[61]);
+   printf("npu_regs[5] %lx\n", npu_regs[5]);
+   printf("Size of npu_regs %d\n",(int)(sizeof(npu_regs)/sizeof(uint64_t)));
+   memcpy(regcmd,npu_regs,sizeof(npu_regs));
+ 
+   tasks[0].flags  = 0;
+   tasks[0].op_idx = 4;
+   tasks[0].enable_mask = 0x18;
+   tasks[0].int_mask = 0x300; // wait for DPU to finish
+   tasks[0].int_clear = 0x1ffff;
+   tasks[0].int_status = 0;
+   tasks[0].regcfg_amount = sizeof(npu_regs)/sizeof(uint64_t); //nInstrs - 1;
+   tasks[0].regcfg_offset = 0;
+   tasks[0].regcmd_addr = regcmd_dma;
+ 
+   memset((void *)input,0,1*sizeof(float));
+   memset((void *)weights,0,1*sizeof(float));
+   memset((void *)output,0,1*sizeof(float));
+ 
+   float *weights_fp16 = static_cast<float*>(weights);
+   for (int i = 0; i < 1; ++i) {
+       weights_fp16[i] = 10.0f;
+   }
+
+   float *feature_data_fp16 = static_cast<float*>(input);
+   for (int i = 0; i < 1; ++i) {
+       feature_data_fp16[i] = 10.0f;
+   }
+ 
+   munmap(input,4194304);
+   munmap(weights,4194304);
+
+   struct rknpu_submit submit = {
+     .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
+     .timeout = 6000,
+     .task_start = 0,
+     .task_number = 1,
+     .task_counter = 0,
+     .priority = 0,
+     .task_obj_addr = tasks_obj,
+     .regcfg_obj_addr = 0,
+     .task_base_addr = 0,
+     .user_data = 0,
+     .core_mask = 1,
+     .fence_fd = -1,
+     .subcore_task = { // Only use core 1, nothing for core 2/3
+      {
+        .task_start = 0,
+        .task_number = 1,
+      }, { 1, 0}, {2, 0}
+    },
+   
+   };
+   for (int i = 0; i < 1; i++) {
+    ret = ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, &submit);
+    printf("RKNPU_SUBMIT returned %d\n", ret);
+   }
+  
+ 
+   printf("=========================================================================================================\n");
+   float *output_data = static_cast<float*>(output);
+   printf("Output data:\n");
+   for (size_t i = 0; i < 50; ++i) {
+       printf("%f ", output_data[i]);
+   }
+ 
+   
+   printf("\033[0;37m");
+   printf("=========================================================================================================\n");
+ 
+   
+
+   printf("input: %p\n", input);
+
+
+
+   munmap(regcmd,1024);
+   munmap(tasks,1024);
+   munmap(input,4194304);
+   munmap(weights,4194304);
+   munmap(output,4194304);
+ 
+   mem_destroy(fd, regcmd_handle, regcmd_obj);
+   mem_destroy(fd, tasks_handle, tasks_obj );
+   mem_destroy(fd, input_handle, input_obj);
+   mem_destroy(fd, weights_handle, weights_obj);
+   mem_destroy(fd, output_handle, output_obj);
+ 
+   close(fd);
+   return 0;
+ }

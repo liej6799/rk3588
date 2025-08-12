@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wl,--allow-shlib-undefined -Wl,--allow-shlib-undefined CMakeFiles/add.dir/add.cpp.o -o add   -L/data/Dev/rk3588/rknn-reg/../../rknn-header  -Wl,-rpath,/data/Dev/rk3588/rknn-reg/../../rknn-header: -lrknnrt 
