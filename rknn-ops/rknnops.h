@@ -56,9 +56,6 @@ emit_raw(uint32_t target, uint32_t reg,
    packed_value |= (uint64_t)reg;
 
    printf("packed_value123: 0x%016llx\n", packed_value);
-   printf("target: 0x%08x\n", target);
-   printf("reg: 0x%08x\n", reg);
-   printf("value: %d\n", value);
 
    push(packed_value);
 }
@@ -165,73 +162,6 @@ int get_type_size(rknn_tensor_type type){
   }
 
  
- uint64_t npu_regs[] = {
-    0x10010000000e4004, // 0
-    0x1001000001e5400c, // 2
-    0x1001480000024010, // 3
-    0x100100070007403c, // 10
-    0x1001000000534040, // 11
-    0x1001000000024050, // 15
-    0x1001000000004054, // 16
-    0x1001000000074058, // 17
-    0x100100000009405c, // 18
-    0x1001000000534060, // 19
-    0x1001000000004064, // 20 
-    0x1001000000004068, // 21
-    0x100100000000406c, // 22
-
-    0x1001108202c04070, // 23 // 0x1001108003c44070 0x1001108202c04070 0x1001108402c04070
-    0x1001000000004074, // 24
-    0x1001000000014078, // 25
-    0x100100000000407c, // 26
-    0x1001000000004080, // 27
-
-    0x1001000100014084, // 28
-    0x1001000000004088, // 29
-    0x1001000000004090, // 30
-    0x1001000000004094, // 31
-    0x1001000000004098, // 32
-    0x100100000000409c, // 33
-    0x10010000000040a0, // 34
-    0x10010000000040a4, // 35
-    0x10010000000040a8, // 36
-    0x10010000000040ac, // 37
-    0x1001000000c040c0, // 38
-    0x10010000000040c4, // 39
-    0x1001000000004100, // 40
-    0x1001000000004104, // 41
-    0x1001000000004108, // 42
-    0x100100000000410c, // 43
-    0x1001000000004110, // 44
-    0x1001000000004114, // 45
-    0x1001000000004118, // 46
-    0x100100000000411c, // 47
-    0x1001000000004120, // 48
-    0x1001000000004124, // 49
-    0x1001000000004128, // 50
-    0x100100000000412c, // 51
-    0x200100000009500c, // 52
-    0x2001000000005010, // 53
-    0x2001000000075014, // 54
-    0x2001000000005018, // 55
-    0x200100000000501c, // 56
-    0x2001000000005020, // 57
-    0x2001000000005028, // 58
-    0x200100000000502c, // 59
-    0x2001400000085034, // 60
-    0x2001000000005038, // 61
-    0x2001000000c05040, // 62
-    0x2001000178495044, // 63
-    0x2001000000005048, // 64
-    0x200100000020504c, // 65
-    0x2001000000005064, // 66
-    0x2001010101015068, // 67
-    0x200100000020506c, // 68
-    0x0000000000000000, // 69
-    0x0101000000000014, // 70
-    0x0041000000000000, // 71
-    0x0081000000180008, // 72
-    };
 
 int getDeviceFd()
 {
@@ -389,32 +319,95 @@ MemHandles createRegCmd(int fd, int type_size)
     // 512 << 16 = 0x02000000
     // x << 16 = 0x00010001
       
-   uint64_t packed_value = 0;
-   uint64_t target = 0x1001;
-   uint64_t reg = 0x4084;
-   uint64_t value = 65537; // 0x00010001
-
-   packed_value = (target << 48) | (value << 16) | reg;
-
-    // Use PRIu64 or PRIx64 from inttypes.h for safe printing
-    printf("packed_value123: 0x%016llx\n", packed_value);
-
-
-    EMIT(REG_DPU_OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(value));
+    emit_raw(DPU | 0x1, REG_DPU_OUT_CVT_SCALE, 65537);
 
     EMIT(REG_DPU_OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(1-1));
-    
-    npu_regs[55] = 0x2001000000005018 | ((input_dma & 0xFFFFFFFF) <<16);
-    npu_regs[61] = 0x2001000000005038 | ((weights_dma & 0xFFFFFFFF)  <<16);
-    npu_regs[5] = 0x1001000000004020 | ((output_dma & 0xFFFFFFFF) <<16);
+    EMIT(REG_DPU_EW_OP_VALUE_0, 0);
+    EMIT(REG_DPU_EW_OP_VALUE_1, 0);
+    EMIT(REG_DPU_EW_OP_VALUE_2, 0);
+    EMIT(REG_DPU_EW_OP_VALUE_3, 0);
+    EMIT(REG_DPU_EW_OP_VALUE_4, 0);
+    EMIT(REG_DPU_EW_OP_VALUE_5, 0);
+    EMIT(REG_DPU_EW_OP_VALUE_6, 0);
+    EMIT(REG_DPU_EW_OP_VALUE_7, 0);
 
- 
+    EMIT(REG_DPU_SURFACE_ADD, DPU_SURFACE_ADD_SURF_ADD(12))
+    EMIT(REG_DPU_SURFACE_ADD, DPU_SURFACE_ADD_SURF_ADD(12))
+
+    emit_raw(DPU | 0x1, 0x40c4, 0);
+    EMIT(REG_DPU_LUT_ACCESS_CFG, 0);
+    EMIT(REG_DPU_LUT_ACCESS_DATA, 0);
+    EMIT(REG_DPU_LUT_CFG, 0);
+    EMIT(REG_DPU_LUT_INFO, 0);
+    EMIT(REG_DPU_LUT_LE_START, 0);
+    EMIT(REG_DPU_LUT_LE_END, 0);
+    EMIT(REG_DPU_LUT_LO_START, 0);
+    EMIT(REG_DPU_LUT_LO_END, 0);
+    EMIT(REG_DPU_LUT_LE_SLOPE_SCALE, 0);
+    EMIT(REG_DPU_LUT_LE_SLOPE_SHIFT, 0);
+    EMIT(REG_DPU_LUT_LO_SLOPE_SCALE, 0);
+    EMIT(REG_DPU_LUT_LO_SLOPE_SHIFT, 0);
+
+    EMIT(REG_DPU_DST_BASE_ADDR, DPU_DST_BASE_ADDR_DST_BASE_ADDR(output_dma))
+    EMIT(REG_DPU_RDMA_RDMA_SRC_BASE_ADDR, DPU_RDMA_RDMA_SRC_BASE_ADDR_SRC_BASE_ADDR(input_dma))
+    EMIT(REG_DPU_RDMA_RDMA_EW_BASE_ADDR, DPU_RDMA_RDMA_EW_BASE_ADDR_EW_BASE_ADDR(weights_dma))
+        
+    EMIT(REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH,
+      DPU_RDMA_RDMA_DATA_CUBE_WIDTH_WIDTH(9));
+   EMIT(REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT,
+         DPU_RDMA_RDMA_DATA_CUBE_HEIGHT_HEIGHT(0));
+   EMIT(REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL,
+         DPU_RDMA_RDMA_DATA_CUBE_CHANNEL_CHANNEL(7));
+
+      EMIT(REG_DPU_RDMA_RDMA_BRDMA_CFG, DPU_RDMA_RDMA_BRDMA_CFG_BRDMA_DATA_USE(0));
+
+      EMIT(REG_DPU_RDMA_RDMA_NRDMA_CFG, 0);
+      EMIT(REG_DPU_RDMA_RDMA_BN_BASE_ADDR, 0);
+
+      EMIT(REG_DPU_RDMA_RDMA_ERDMA_CFG,
+         DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_MODE(1) |
+            DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_SIZE(2)); // 16 bit
+      EMIT(REG_DPU_RDMA_RDMA_EW_SURF_STRIDE,
+         DPU_RDMA_RDMA_EW_SURF_STRIDE_EW_SURF_STRIDE(12));
+         //0x2001000178495044
+         uint32_t rdma_feat_mode_cfg = 0x0;
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_IN_PRECISION(2);
+
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_BURST_LEN(15);
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_COMB_USE(0);
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_PROC_PRECISION(2);
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_MRDMA_DISABLE(0);
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_MRDMA_FP16TOFP32_EN(1);
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_CONV_MODE(0);
+         rdma_feat_mode_cfg |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_FLYING_MODE(1);
+          
+         EMIT(REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG, rdma_feat_mode_cfg);
+         EMIT(REG_DPU_RDMA_RDMA_SRC_DMA_CFG, 0);
+         EMIT(REG_DPU_RDMA_RDMA_SURF_NOTCH,
+            DPU_RDMA_RDMA_SURF_NOTCH_SURF_NOTCH_ADDR(2));
+         EMIT(REG_DPU_RDMA_RDMA_PAD_CFG, 0);
+         EMIT(REG_DPU_RDMA_RDMA_WEIGHT,
+            DPU_RDMA_RDMA_WEIGHT_E_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_N_WEIGHT(1) |
+               DPU_RDMA_RDMA_WEIGHT_B_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_M_WEIGHT(1));
+         EMIT(REG_DPU_RDMA_RDMA_EW_SURF_NOTCH,
+           DPU_RDMA_RDMA_EW_SURF_NOTCH_EW_SURF_NOTCH(2)); 
+         emit_raw(0x00, 0x00, 0);
+         EMIT(REG_PC_REGISTER_AMOUNTS, 0);
+
+         //util_dynarray_append(regs, uint64_t, 0x0041000000000000);
+         // 0x0081000000180008
+         push(0x0101000000000014);
+         emit_raw(0x81, REG_PC_OPERATION_ENABLE,
+            PC_OPERATION_ENABLE_RESERVED_0(12) | PC_OPERATION_ENABLE_OP_EN(0));           
 /**
 0x1001000100014084 = 0x00010001
 0x1001000002004084 = 0x00000200
 */
-        
-    memcpy(regcmd,npu_regs,sizeof(npu_regs));
+   
+    uint64_t npu_regs_a[Q.size()];
+    std::copy(Q.begin(), Q.end(), npu_regs_a);  // Copy elements to array
+
+    memcpy(regcmd,npu_regs_a,sizeof(npu_regs_a));
 
     tasks[0].flags  = 0;
     tasks[0].op_idx = 4;
@@ -422,7 +415,7 @@ MemHandles createRegCmd(int fd, int type_size)
     tasks[0].int_mask = 0x300; // wait for DPU to finish
     tasks[0].int_clear = 0x1ffff;
     tasks[0].int_status = 0;
-    tasks[0].regcfg_amount = sizeof(npu_regs)/sizeof(uint64_t); //nInstrs - 1;
+    tasks[0].regcfg_amount = sizeof(npu_regs_a)/sizeof(uint64_t); //nInstrs - 1;
     tasks[0].regcfg_offset = 0;
     tasks[0].regcmd_addr = regcmd_dma;
     
