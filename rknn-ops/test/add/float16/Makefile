@@ -1,11 +1,11 @@
 # Makefile for float16 NPU test program
 CXX = g++
-CXXFLAGS = -Wall -Wextra -std=c++11
+CXXFLAGS = -Wall -Wextra
 TARGET = main
-SOURCE = main.cc
+SOURCE = main.c
 
 # Include paths
-INCLUDES = -I/data/Dev/rk3588/rknn-header -I/usr/include/libdrm -I/data/Dev/rk3588/rknn-ops
+INCLUDES = -I/data/Dev/rk3588/rknn-header -I/data/Dev/rk3588/rknn-ops
 
 # Libraries
 LIBS = -ldrm

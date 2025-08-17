@@ -20,18 +20,12 @@
 #ifndef RKNNOPS_H
 #define RKNNOPS_H
 
-#include <stdint.h>
-#include <stddef.h>
-#include <typeinfo>
-#include <unistd.h>
+
 #include <sys/ioctl.h>
-#include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <sys/mman.h>
 #include <math.h>
-#include <vector>
 #include <libdrm/drm.h>
 #include "rknpu-ioctl.h"
 #include "rknn_api.h"
@@ -41,13 +35,46 @@
 extern "C" {
 #endif
 
-std::vector<uint64_t> Q = {};
-void push(uint64_t q){
-    Q.push_back(q);
+typedef struct {
+   uint64_t *data;         // Pointer to the array memory
+   size_t size;       // Current number of elements
+   size_t capacity;   // Allocated capacity of the array
+} DynamicArray;
+
+DynamicArray regs;
+
+// Initialize the dynamic array
+void initArray(DynamicArray *arr, size_t initialCapacity) {
+   arr->data = (uint64_t *)malloc(initialCapacity * sizeof(uint64_t));
+   arr->size = 0;
+   arr->capacity = initialCapacity;
+}
+
+// Push a new element to the dynamic array
+void push(DynamicArray *arr, uint64_t value) {
+   if (arr->size == arr->capacity) {
+       // Increase capacity (e.g., double it)
+       arr->capacity *= 2;
+       arr->data = (uint64_t *)realloc(arr->data, arr->capacity * sizeof(uint64_t));
+       if (arr->data == NULL) {
+           fprintf(stderr, "Memory allocation failed\n");
+           exit(1);
+       }
+   }
+   arr->data[arr->size] = value;
+   arr->size++;
+}
+
+// Free the allocated memory of the array
+void freeArray(DynamicArray *arr) {
+   free(arr->data);
+   arr->data = NULL;
+   arr->size = 0;
+   arr->capacity = 0;
 }
 
 static void
-emit_raw(uint32_t target, uint32_t reg,
+emit_raw(DynamicArray *arr, uint32_t target, uint32_t reg,
          uint64_t value)
 {
    uint64_t packed_value = 0;
@@ -55,16 +82,14 @@ emit_raw(uint32_t target, uint32_t reg,
    packed_value |= ((uint64_t)value) << 16;
    packed_value |= (uint64_t)reg;
 
-   printf("packed_value123: 0x%016llx\n", packed_value);
-
-   push(packed_value);
+   push(arr, packed_value);
 }
 
 static void
 emit(uint32_t reg, uint64_t value)
 {
    uint32_t target = rkt_get_target(reg) + 0x1;
-   emit_raw(target, reg, value);
+   emit_raw(&regs, target, reg, value);
 }
 
 #define EMIT(offset, value) emit(offset, value);
@@ -83,7 +108,7 @@ emit(uint32_t reg, uint64_t value)
 
 
 
- struct MemHandles {
+struct MemHandles {
     void* input;
     void* weights;
     void* output;
@@ -167,26 +192,22 @@ int getDeviceFd()
 {
     int fd = open("/dev/dri/card1", O_RDWR);
     if(fd<0) {
-      printf("Failed to open /dev/dri/card1 %d\n",errno);
+      printf("Failed to open /dev/dri/card1");
       exit(1);
     }
     return fd;  
 }
 
-void boilerplate()
-{
-
-}
 
 
-MemHandles createRegCmd(int fd, int type_size)
+struct MemHandles createRegCmd(int fd, int type_size)
 {
     uint64_t tasks_dma, tasks_obj;
-    struct rknpu_task *tasks = static_cast<struct rknpu_task*>(mem_allocate(fd, 1024, &tasks_dma, &tasks_obj, RKNPU_MEM_KERNEL_MAPPING));
-  
+    struct rknpu_task *tasks = (struct rknpu_task *)mem_allocate(fd, 1024, &tasks_dma, &tasks_obj, RKNPU_MEM_KERNEL_MAPPING);
+
     uint64_t regcmd_dma, regcmd_obj;
-    uint64_t *regcmd = static_cast<uint64_t*>(mem_allocate(fd, 1024, &regcmd_dma, &regcmd_obj, 0));
-  
+    uint64_t *regcmd = (uint64_t *)(mem_allocate(fd, 1024, &regcmd_dma, &regcmd_obj, 0));
+    
     uint64_t input_dma, input_obj;
     void *input = mem_allocate(fd, type_size, &input_dma, &input_obj, 0);  
 
@@ -205,10 +226,10 @@ MemHandles createRegCmd(int fd, int type_size)
     DPU_S_POINTER_EXECUTER_PP_EN(1) |
     DPU_S_POINTER_POINTER_PP_EN(1));
 
-    EMIT(REG_DPU_FEATURE_MODE_CFG, DPU_FEATURE_MODE_CFG_BURST_LEN(0xF) |
+    EMIT(REG_DPU_FEATURE_MODE_CFG, DPU_FEATURE_MODE_CFG_BURST_LEN(15) |
     DPU_FEATURE_MODE_CFG_CONV_MODE(0) |
-    DPU_FEATURE_MODE_CFG_OUTPUT_MODE(0x2) |
-    DPU_FEATURE_MODE_CFG_FLYING_MODE(0x1));
+    DPU_FEATURE_MODE_CFG_OUTPUT_MODE(2) |
+    DPU_FEATURE_MODE_CFG_FLYING_MODE(1));
 
     EMIT(REG_DPU_DATA_FORMAT, DPU_DATA_FORMAT_OUT_PRECISION(2) |
     DPU_DATA_FORMAT_IN_PRECISION(2) |
@@ -298,8 +319,8 @@ MemHandles createRegCmd(int fd, int type_size)
        add_scale = 0.0;
     }
     
+    uint32_t add_scale_bits = (uint32_t)(round(add_scale));
     
-    uint32_t add_scale_bits = static_cast<uint32_t>(std::round(add_scale));
     printf("add_scale_bits: %d\n", add_scale_bits);
 
     unsigned add_shift = 127 + 31 - 32 - (add_scale_bits >> 23) + 16;
@@ -319,7 +340,7 @@ MemHandles createRegCmd(int fd, int type_size)
     // 512 << 16 = 0x02000000
     // x << 16 = 0x00010001
       
-    emit_raw(DPU | 0x1, REG_DPU_OUT_CVT_SCALE, 65537);
+    emit_raw(&regs, DPU | 0x1, REG_DPU_OUT_CVT_SCALE, 65537);
 
     EMIT(REG_DPU_OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(1-1));
     EMIT(REG_DPU_EW_OP_VALUE_0, 0);
@@ -334,7 +355,7 @@ MemHandles createRegCmd(int fd, int type_size)
     EMIT(REG_DPU_SURFACE_ADD, DPU_SURFACE_ADD_SURF_ADD(12))
     EMIT(REG_DPU_SURFACE_ADD, DPU_SURFACE_ADD_SURF_ADD(12))
 
-    emit_raw(DPU | 0x1, 0x40c4, 0);
+    emit_raw(&regs, DPU | 0x1, 0x40c4, 0);
     EMIT(REG_DPU_LUT_ACCESS_CFG, 0);
     EMIT(REG_DPU_LUT_ACCESS_DATA, 0);
     EMIT(REG_DPU_LUT_CFG, 0);
@@ -391,21 +412,21 @@ MemHandles createRegCmd(int fd, int type_size)
                DPU_RDMA_RDMA_WEIGHT_B_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_M_WEIGHT(1));
          EMIT(REG_DPU_RDMA_RDMA_EW_SURF_NOTCH,
            DPU_RDMA_RDMA_EW_SURF_NOTCH_EW_SURF_NOTCH(2)); 
-         emit_raw(0x00, 0x00, 0);
+         emit_raw(&regs, 0x00, 0x00, 0);
          EMIT(REG_PC_REGISTER_AMOUNTS, 0);
 
          //util_dynarray_append(regs, uint64_t, 0x0041000000000000);
          // 0x0081000000180008
-         push(0x0101000000000014);
-         emit_raw(0x81, REG_PC_OPERATION_ENABLE,
+         push(&regs, 0x0101000000000014);
+         emit_raw(&regs, 0x81, REG_PC_OPERATION_ENABLE,
             PC_OPERATION_ENABLE_RESERVED_0(12) | PC_OPERATION_ENABLE_OP_EN(0));           
 /**
 0x1001000100014084 = 0x00010001
 0x1001000002004084 = 0x00000200
 */
    
-    uint64_t npu_regs_a[Q.size()];
-    std::copy(Q.begin(), Q.end(), npu_regs_a);  // Copy elements to array
+      uint64_t npu_regs_a[regs.size];
+      memcpy(npu_regs_a, regs.data, regs.size * sizeof(uint64_t));  // Copy elements to array
 
     memcpy(regcmd,npu_regs_a,sizeof(npu_regs_a));
 
@@ -419,7 +440,7 @@ MemHandles createRegCmd(int fd, int type_size)
     tasks[0].regcfg_offset = 0;
     tasks[0].regcmd_addr = regcmd_dma;
     
-    MemHandles handles;
+    struct MemHandles handles;
     handles.input = input;
     handles.weights = weights;
     handles.output = output;
@@ -471,10 +492,10 @@ __fp16* float16_add_op(__fp16* a, __fp16* b)
     int fd = getDeviceFd();
     rknn_tensor_type dtype = RKNN_TENSOR_FLOAT16;
 
-    MemHandles handles = createRegCmd(fd, get_type_size(dtype));
-    __fp16 *weights_fp16 = static_cast<__fp16*>(handles.weights);
-    __fp16 *feature_data_fp16 = static_cast<__fp16*>(handles.input);
-    __fp16 *output_data = static_cast<__fp16*>(handles.output);
+    struct MemHandles handles = createRegCmd(fd, get_type_size(dtype));
+    __fp16 *weights_fp16 = (__fp16*)(handles.weights);
+    __fp16 *feature_data_fp16 = (__fp16*)(handles.input);
+    __fp16 *output_data = (__fp16*)(handles.output);
     
     memcpy(weights_fp16, a, get_type_size(dtype));
     memcpy(feature_data_fp16, b, get_type_size(dtype));
@@ -487,6 +508,63 @@ __fp16* float16_add_op(__fp16* a, __fp16* b)
     return output_data;
 }
 
+
+/**
+ * @brief Float16 addition operation
+ * @param a First float16 operand
+ * @param b Second float16 operand
+ * @return Sum of a and b in float16 format
+ */
+ int16_t* int16_add_op(int16_t* a, int16_t* b)
+ {
+     int fd = getDeviceFd();
+     rknn_tensor_type dtype = RKNN_TENSOR_INT16;
+
+     struct MemHandles handles = createRegCmd(fd, get_type_size(dtype));
+     int16_t *weights_int16 = (int16_t*)(handles.weights);
+     int16_t *feature_data_int16 = (int16_t*)(handles.input);
+     int16_t *output_data = (int16_t*)(handles.output);
+
+     memcpy(weights_int16, a, get_type_size(dtype));
+     memcpy(feature_data_int16, b, get_type_size(dtype));
+ 
+     int ret = submitTask(fd, handles.tasks_obj);
+     if(ret < 0) {
+         printf("RKNPU_SUBMIT failed %d\n",ret);
+         return NULL;
+     }
+     return output_data;
+}
+
+
+/**
+ * @brief Float16 addition operation
+ * @param a First float16 operand
+ * @param b Second float16 operand
+ * @return Sum of a and b in float16 format
+ */
+ int8_t* int8_add_op(int8_t* a, int8_t* b)
+ {
+
+     int fd = getDeviceFd();
+     rknn_tensor_type dtype = RKNN_TENSOR_INT8;
+     initArray(&regs, 1024);
+
+     struct MemHandles handles = createRegCmd(fd, get_type_size(dtype));
+     int8_t *weights_int8 = (int8_t*)(handles.weights);
+     int8_t *feature_data_int8 = (int8_t*)(handles.input);
+     int8_t *output_data = (int8_t*)(handles.output);
+
+     memcpy(weights_int8, a, get_type_size(dtype));
+     memcpy(feature_data_int8, b, get_type_size(dtype));
+ 
+     int ret = submitTask(fd, handles.tasks_obj);
+     if(ret < 0) {
+         printf("RKNPU_SUBMIT failed %d\n",ret);
+         return NULL;
+     }
+     return output_data;
+}
 
 
 #ifdef __cplusplus
