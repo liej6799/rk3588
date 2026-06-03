@@ -53,11 +53,12 @@ class PtrDType:
   def __repr__(self) -> str: return f"{self.pointee!r}.ptr({self.size})"
 
 class dtypes:
-  void  = DType("void", 0)
-  bool  = DType("bool", 1)
-  int   = DType("int", 4)
-  half  = DType("half", 2)
-  float = DType("float", 4)
+  void    = DType("void", 0)
+  bool    = DType("bool", 1)
+  int     = DType("int", 4)
+  weakint = DType("weakint", 4)         # an unsized integer literal (folds like int)
+  half    = DType("half", 2)
+  float   = DType("float", 4)
 
 # ---------------------------------------------------------------------------
 # kernel metadata
@@ -83,8 +84,10 @@ class UOp:
   # --- builders (mirror the tinygrad helpers we use) ---
   @staticmethod
   def const(dtype, b) -> "UOp": return UOp(Ops.CONST, dtype, (), b)
-  @staticmethod
-  def sink(*srcs: "UOp", arg=None) -> "UOp": return UOp(Ops.SINK, dtypes.void, tuple(s for s in srcs if s is not None), arg)
+  def sink(self, *srcs: "UOp", arg=None) -> "UOp":
+    # instance method: sinks self plus any extra srcs (None dropped). `UOp.sink(a, b)` also
+    # works (a becomes self), matching how the unroller and tinygrad-style code call it.
+    return UOp(Ops.SINK, dtypes.void, tuple(s for s in (self, *srcs) if s is not None), arg)
   @staticmethod
   def range(end: int, axis_id: int, axis_type: AxisType) -> "UOp":
     return UOp(Ops.RANGE, dtypes.int, (UOp.const(dtypes.int, end),), (axis_id, axis_type))
@@ -92,6 +95,16 @@ class UOp:
   def load(self) -> "UOp": return UOp(Ops.LOAD, self.dtype.base if isinstance(self.dtype, PtrDType) else self.dtype, (self,))
   def store(self, val: "UOp") -> "UOp": return UOp(Ops.STORE, dtypes.void, (self, val))
   def end(self, *rngs: "UOp") -> "UOp": return UOp(Ops.END, dtypes.void, (self, *rngs))
+
+  # --- arithmetic (tinygrad-style): an INDEX used as a value is implicitly LOADed ---
+  def _rval(self) -> "UOp": return self.load() if self.op is Ops.INDEX else self
+  def alu(self, op: Ops, other) -> "UOp":
+    a = self._rval()
+    b = (other._rval() if isinstance(other, UOp) else UOp.const(a.dtype, other))
+    return UOp(op, a.dtype, (a, b))
+  def __add__(self, other) -> "UOp": return self.alu(Ops.ADD, other)
+  def __mul__(self, other) -> "UOp": return self.alu(Ops.MUL, other)
+  def __sub__(self, other) -> "UOp": return self.alu(Ops.SUB, other)
 
   # --- graph utilities ---
   def toposort(self) -> list["UOp"]:

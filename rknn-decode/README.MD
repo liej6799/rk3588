@@ -23,6 +23,9 @@ rknn-decode/
 │   └── viz.py          #   serve(model): host an ONNX/.rknn model in netron
 ├── refs/               # vendored references (no external deps)
 │   └── rkt_registers.h #   rk3588 NPU register names, used to label the decoded command queue
+├── add2d_ops/          # example: 2D nested-loop half add (N=100), index i*cols+j
+│   ├── uops.py         #   make_add2d_uops(rows, cols): two RANGE loops + computed index
+│   └── synth.py        #   2D-loop UOps -> .rknn (no onnx/toolkit) -> run on NPU
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
 │   ├── run.py          #   load the uops, then fully unroll and print
@@ -40,7 +43,8 @@ rknn-decode/
 │   ├── test_rknn.py    #   load -> unroll -> ONNX -> .rknn export
 │   ├── test_decode.py  #   disassemble the .rknn: container + graph + command queue
 │   ├── test_recreate.py#   rebuild the .rknn from decode and assert byte-identity + NPU run
-│   └── test_synth.py   #   UOps -> .rknn (no onnx/toolkit) for 1x1/3x3/5x5, run on NPU
+│   ├── test_synth.py   #   UOps -> .rknn (no onnx/toolkit) for 1x1/3x3/5x5, run on NPU
+│   └── test_add2d.py   #   2D nested-loop add (N=100): unroll -> synth -> run on NPU
 ├── conftest.py         # marks the project root for pytest imports
 └── README.MD
 ```
@@ -213,7 +217,17 @@ blob = uops_to_rknn(fully_unroll(make_add_uops(25)))   # bytes; no onnx, no tool
 ```
 
 Verified on the NPU for 1×1, 3×3, 5×5 (`z == a + b`, see `tests/test_synth.py`). The
-build never imports `rknn` — only the `flatbuffers` library. This is **functional**
+build never imports `rknn` — only the `flatbuffers` library.
+
+The same path handles a **2D nested-loop** kernel (`add2d_ops`): two `RANGE` loops with a
+computed flat index `i*cols + j`, using the UOp operator syntax (`*`, `+`, an `INDEX` used
+as a value is implicitly loaded, instance `.sink`). After `fully_unroll` (cartesian
+product over both loops) the graph is the same flat per-element add, so `uops_to_rknn`
+treats it identically — verified on the NPU for N=100 (10×10):
+
+```sh
+.venv/bin/python3 -m add2d_ops.synth          # 10x10 = 100, toolkit-free, run on NPU
+``` This is **functional**
 equivalence: the synthesized file computes the same result, but it is not byte-identical
 to a toolkit build (it uses a compact single-tile / multi-surface memory plan instead of
 the compiler's per-element `Split`/`Concat` layout). The builders are vendored under
