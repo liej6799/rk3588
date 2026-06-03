@@ -13,7 +13,7 @@ rknn-decode/
 │   ├── unroll.py       #   fully_unroll(uops): expand constant-bound RANGE loops
 │   ├── interp.py       #   run_uops(uops, buffers): execute a range-free graph
 │   ├── onnx_export.py  #   uops_to_onnx(uops): build an ONNX graph from a range-free graph
-│   ├── rknn_export.py  #   onnx_to_rknn(model, path): build a .rknn for the RK3588 NPU
+│   ├── rknn_export.py  #   onnx_to_rknn_bytes(model): build a .rknn for the RK3588 NPU (in RAM)
 │   └── viz.py          #   serve(model): host an ONNX model in netron
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
@@ -57,17 +57,25 @@ Then open the printed URL in a browser. Or from code: `from add_ops.viz import s
 ### Export to .rknn
 
 Build the ONNX graph and convert it to a Rockchip `.rknn` for the RK3588 NPU with
-[rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2):
+[rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2). The conversion runs
+**in memory** — `onnx_to_rknn_bytes` returns the `.rknn` as bytes:
 
 ```python
 from add_ops.viz import build_model
-from helpers.rknn_export import onnx_to_rknn
-onnx_to_rknn(build_model(), "add_5x5.rknn")            # float16; target_platform="rk3588"
+from helpers.rknn_export import onnx_to_rknn_bytes
+blob = onnx_to_rknn_bytes(build_model())               # bytes; float16; target_platform="rk3588"
 ```
 
+Want a file instead? `onnx_to_rknn(model, "add_5x5.rknn")` wraps it and writes the
+bytes out.
+
 Exports float16 by default; pass `do_quantization=True` with a `dataset` file (one
-input-sample path per line) for a quantized model. Needs `rknn-toolkit2` in the venv
-(which in turn needs `setuptools<81` for `pkg_resources`).
+input-sample path per line) for a quantized model.
+
+rknn-toolkit2 only loads/exports via file *paths* (it has no in-memory API), so the
+intermediate `.onnx` and the `.rknn` are routed through a tmpfs dir (`/dev/shm`, RAM)
+and removed before returning — nothing is written to persistent disk. Needs
+`rknn-toolkit2` in the venv (which in turn needs `setuptools<81` for `pkg_resources`).
 
 ## Tests
 
