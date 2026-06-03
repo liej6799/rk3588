@@ -53,6 +53,7 @@ Build the ONNX graph from the unrolled UOps and host it in [netron](https://gith
 ```
 
 Then open the printed URL in a browser. Or from code: `from add_ops.viz import show; show()`.
+The graph is streamed to netron from memory — no `.onnx` file is written to disk.
 
 ### Export to .rknn
 

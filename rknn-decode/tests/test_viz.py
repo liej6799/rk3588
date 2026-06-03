@@ -10,12 +10,10 @@ from add_ops.viz import build_model
 def test_build_model_is_valid():
   onnx.checker.check_model(build_model())            # the built graph is a valid model
 
-def test_serve_saves_and_hosts(tmp_path):
+def test_serve_hosts_from_memory():
   netron = pytest.importorskip("netron")
-  path = str(tmp_path / "add.onnx")
-  host, port = serve(build_model(), address=("127.0.0.1", 8096), path=path)
+  host, port = serve(build_model(), address=("127.0.0.1", 8096))   # served from bytes, no file written
   try:
-    assert os.path.exists(path)                      # serve() wrote the ModelProto to disk
     time.sleep(1)
     assert urllib.request.urlopen(f"http://{host}:{port}/", timeout=5).getcode() == 200
   finally:

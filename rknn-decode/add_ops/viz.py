@@ -17,9 +17,11 @@ def build_model():
   """Build the add_ops ONNX model from the unrolled UOps."""
   return uops_to_onnx(fully_unroll(load_uops()), name="add_5x5")
 
-def show(address=("0.0.0.0", 8080), browse: bool = False, path: str | None = None):
-  """Host the add_ops ONNX graph in netron. Returns the (host, port) it serves on."""
-  return serve(build_model(), address=address, browse=browse, path=path)
+def show(address=("0.0.0.0", 8080), browse: bool = False):
+  """Host the add_ops ONNX graph in netron (served from memory, no file written).
+
+  Returns the (host, port) it serves on."""
+  return serve(build_model(), address=address, browse=browse)
 
 if __name__ == "__main__":
   import time
