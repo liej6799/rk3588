@@ -11,9 +11,10 @@ which depend only on the `flatbuffers` library).
     blob = uops_to_rknn(fully_unroll(make_add_uops(25)))   # bytes; no onnx, no toolkit
     z = run_uops_on_npu(make_add_uops(25), [a, b])         # one call: UOps -> NPU result
 
-Scope: 2-input fp16 element-wise add (`z = a + b`) for N = 1..50,231,944. The command
-buffer is generated from `_rc_template_gen` (the readable regcmd generator), not copied
-from any library output.
+Scope: 2-input fp16 element-wise add (`z = a + b`) or multiply (`z = a * b`) for
+N = 1..50,231,944. The command buffer is generated from `_rc_template_gen` (the readable
+regcmd generator), not copied from any library output; MUL reuses the same tiles with the
+EW_CFG ALU op retargeted to the multiply path.
 """
 import math
 
@@ -21,35 +22,45 @@ from .uop import Ops
 from .unroll import fully_unroll
 from . import _rknn_flatbuf as _fb
 
+# DPU EW_CFG (0x4070) value per element-wise op, recovered by diffing toolkit Add vs Mul
+# models: ADD uses the ALU sum path (EW_OP_TYPE=0, EW_ALU_ALGO=2); MUL uses the multiply
+# path (EW_OP_TYPE=1). Everything else in the tile (geometry, addresses) is identical.
+_EW_CFG = {Ops.ADD: 0x108202C0, Ops.MUL: 0x108003C4}
+_EW_CFG_REG = ("DPU", 0x4070)
 
-def analyze_add(uops) -> int:
-  """Validate a fully-unrolled 2-input element-wise add and return its element count N.
 
-  Expects every STORE to be `STORE(INDEX(out,k), ADD(LOAD(INDEX(a,k)), LOAD(INDEX(b,k))))`
-  with exactly one output PARAM and two input PARAMs. Raises ValueError otherwise.
+def analyze_elementwise(uops):
+  """Validate a fully-unrolled 2-input element-wise op and return (N, op).
+
+  Every STORE must be `STORE(INDEX(out,k), OP(LOAD(INDEX(a,k)), LOAD(INDEX(b,k))))` where
+  OP is the same ADD or MUL across all stores, with one output PARAM and two input PARAMs.
+  Raises ValueError otherwise (e.g. for MUL/REDUCE trees like matmul).
   """
   if any(u.op is Ops.RANGE for u in uops):
     raise ValueError("expected a fully-unrolled (range-free) graph; call fully_unroll first")
   stores = [u for u in uops if u.op is Ops.STORE]
   if not stores:
     raise ValueError("no STORE in uops")
-  out_params, in_params = set(), set()
-  out_offsets = []
+  out_params, in_params, ops, out_offsets = set(), set(), set(), []
   for st in stores:
     idx, val = st.src
     if idx.op is not Ops.INDEX or idx.src[0].op is not Ops.PARAM or idx.src[1].op is not Ops.CONST:
       raise ValueError("STORE target must be INDEX(PARAM, CONST)")
     out_params.add(idx.src[0].arg)
     out_offsets.append(idx.src[1].arg)
-    if val.op is not Ops.ADD or len(val.src) != 2:
-      raise ValueError("only a 2-operand element-wise ADD (z = a + b) is supported")
+    if val.op not in (Ops.ADD, Ops.MUL) or len(val.src) != 2:
+      raise ValueError("only a 2-operand element-wise ADD or MUL (z = a+b / a*b) is supported")
+    ops.add(val.op)
     for ld in val.src:
       if ld.op is not Ops.LOAD or ld.src[0].op is not Ops.INDEX or ld.src[0].src[0].op is not Ops.PARAM:
         raise ValueError(
-          "not a simple element-wise add: each ADD operand must be LOAD(INDEX(PARAM, CONST)). "
-          "Kernels with MUL/REDUCE (e.g. matmul) are not supported by the toolkit-free "
-          "synthesizer (the NPU matmul/conv engine is a separate, un-ported command stream).")
+          "not a simple element-wise op: each operand must be LOAD(INDEX(PARAM, CONST)). "
+          "Kernels with a reduction (e.g. matmul: sum of products) are not supported by "
+          "the toolkit-free synthesizer (the NPU matmul/conv engine is a separate, "
+          "un-ported command stream).")
       in_params.add(ld.src[0].src[0].arg)
+  if len(ops) != 1:
+    raise ValueError(f"all stores must use the same op, got {sorted(o.name for o in ops)}")
   if len(out_params) != 1:
     raise ValueError(f"expected exactly one output PARAM, got {sorted(out_params)}")
   if len(in_params) != 2:
@@ -57,21 +68,46 @@ def analyze_add(uops) -> int:
   N = len(stores)
   if sorted(out_offsets) != list(range(N)):
     raise ValueError("STOREs must cover output offsets 0..N-1 exactly once")
+  return N, next(iter(ops))
+
+
+def analyze_add(uops) -> int:
+  """Validate a fully-unrolled 2-input element-wise ADD; return N. (See analyze_elementwise.)"""
+  N, op = analyze_elementwise(uops)
+  if op is not Ops.ADD:
+    raise ValueError(f"expected an element-wise ADD, got {op.name}")
   return N
 
 
+def _retarget_ew_op(blob: bytes, op) -> bytes:
+  """Rewrite every EW_BINARY tile's EW_CFG to select `op` (ADD or MUL). ADD is a no-op."""
+  if op is Ops.ADD:
+    return blob
+  from .rknn_decode import decode_rknn, split_container
+  from .rknn_encode import encode_container, reemit_command_stream
+  target = _EW_CFG[op]
+  version, body, trailer = split_container(blob)
+  d = decode_rknn(blob)
+  for blk in d["command_queue"]:
+    if blk["kind"].startswith("EW_BINARY"):
+      blk["regs"] = [(t, off, name, target if (t, off) == _EW_CFG_REG else val)
+                     for t, off, name, val in blk["regs"]]
+  return encode_container(version, reemit_command_stream(body, d["command_queue"]), trailer)
+
+
 def uops_to_rknn(uops, rows: int | None = None, cols: int | None = None) -> bytes:
-  """Build a runnable .rknn (bytes) from a fully-unrolled element-wise add UOp graph.
+  """Build a runnable .rknn (bytes) from a fully-unrolled element-wise add/mul UOp graph.
 
   No ONNX, no rknn-toolkit2. `rows`/`cols` set the reported shape (cosmetic for the
   runtime); they default to a square if N is a perfect square, else `[1, N]`.
   """
-  N = analyze_add(uops)
+  N, op = analyze_elementwise(uops)
   if rows is None or cols is None:
     s = math.isqrt(N)
     rows, cols = (s, s) if s * s == N else (1, N)
   body = _fb.build_body(N, 2)                          # FlatBuffer + regcmd, from scratch
-  return _fb.assemble_rknn(body, rows, cols, 2)        # + 64-byte header + JSON trailer
+  blob = _fb.assemble_rknn(body, rows, cols, 2)        # + 64-byte header + JSON trailer
+  return _retarget_ew_op(blob, op)                     # ADD template -> MUL if needed
 
 
 def run_uops_on_npu(uops, inputs, target: str = "rk3588",
@@ -88,7 +124,7 @@ def run_uops_on_npu(uops, inputs, target: str = "rk3588",
 
   if any(u.op is Ops.RANGE for u in uops):
     uops = fully_unroll(uops)
-  N = analyze_add(uops)
+  N, _op = analyze_elementwise(uops)
   if len(inputs) != 2:
     raise ValueError(f"expected 2 input arrays (a, b), got {len(inputs)}")
   blob = uops_to_rknn(uops, rows, cols)

@@ -26,6 +26,9 @@ rknn-decode/
 ├── add2d_ops/          # example: 2D nested-loop half add (N=100), index i*cols+j
 │   ├── uops.py         #   make_add2d_uops(rows, cols): two RANGE loops + computed index
 │   └── synth.py        #   2D-loop UOps -> .rknn (no onnx/toolkit) -> run on NPU
+├── mul_ops/            # example: 2D-loop element-wise multiply z = a * b (N=100)
+│   ├── uops.py         #   make_mul_uops(rows, cols): the tinygrad test_mul kernel
+│   └── synth.py        #   mul UOps -> .rknn (no onnx/toolkit) -> run on NPU
 ├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
 │   └── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
@@ -47,6 +50,7 @@ rknn-decode/
 │   ├── test_recreate.py#   rebuild the .rknn from decode and assert byte-identity + NPU run
 │   ├── test_synth.py   #   UOps -> .rknn (no onnx/toolkit) for 1x1/3x3/5x5, run on NPU
 │   ├── test_add2d.py   #   2D nested-loop add (N=100): unroll -> synth -> run on NPU
+│   ├── test_mul.py     #   element-wise multiply (N=100): unroll -> synth (MUL EW op) -> NPU
 │   └── test_matmul.py  #   matmul (REDUCE): unroll -> interp == numpy; synth rejects it
 ├── conftest.py         # marks the project root for pytest imports
 └── README.MD
@@ -235,6 +239,16 @@ treats it identically — verified on the NPU for N=100 (10×10):
 
 ```sh
 .venv/bin/python3 -m add2d_ops.synth          # 10x10 = 100, toolkit-free, run on NPU
+```
+
+**Element-wise multiply (`mul_ops`).** `z = a * b` runs on the NPU toolkit-free too — same
+tiles as the add, with the EW datapath retargeted from the ALU-sum op to the multiply op
+(`EW_CFG` `0x108202c0` → `0x108003c4`, i.e. `EW_OP_TYPE=1`; recovered by diffing a toolkit
+Add vs Mul model). `uops_to_rknn` picks the op automatically from the UOp graph
+(`analyze_elementwise` returns `(N, ADD|MUL)`). Verified on the NPU for N=100:
+
+```sh
+.venv/bin/python3 -m mul_ops.synth            # 10x10 = 100, z = a*b, toolkit-free
 ```
 
 **Reductions / matmul (`matmul_ops`).** The UOp layer also handles `Ops.REDUCE`: a matmul
