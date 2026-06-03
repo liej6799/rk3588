@@ -49,6 +49,23 @@ def test_synth_selects_mul_ewop():
     cfg = next(v for t, off, _n, v in b["regs"] if (t, off) == ("DPU", 0x4070))
     assert cfg == _EW_CFG[Ops.MUL]
 
+def test_viz_onnx_graph_is_mul():
+  import onnx
+  from mul_ops.viz import build_model
+  m = build_model()
+  onnx.checker.check_model(m)
+  ops = [n.op_type for n in m.graph.node]
+  assert ops.count("Mul") == 100 and ops.count("Gather") == 200 and ops.count("Concat") == 1
+
+def test_disasm_synth_mul():
+  from mul_ops.viz import build_rknn
+  d = decode_rknn(build_rknn())
+  assert d["nodes"][0]["op"] == "InputOperator" and d["nodes"][-1]["op"] == "OutputOperator"
+  ew = [b for b in d["command_queue"] if b["kind"].startswith("EW_BINARY")]
+  assert ew and all(
+    next(v for t, off, _n, v in b["regs"] if (t, off) == ("DPU", 0x4070)) == _EW_CFG[Ops.MUL]
+    for b in ew)
+
 def test_mul_runs_on_npu():
   N = 100
   A = (np.arange(N) % 7).astype(np.float16)

@@ -28,6 +28,9 @@ rknn-decode/
 │   └── synth.py        #   2D-loop UOps -> .rknn (no onnx/toolkit) -> run on NPU
 ├── mul_ops/            # example: 2D-loop element-wise multiply z = a * b (N=100)
 │   ├── uops.py         #   make_mul_uops(rows, cols): the tinygrad test_mul kernel
+│   ├── run.py          #   load the uops, fully unroll, and print both
+│   ├── viz.py          #   host the ONNX graph (Gather/Mul/Concat) or synth .rknn in netron
+│   ├── disasm.py       #   disassemble the toolkit-free synthesized mul .rknn
 │   └── synth.py        #   mul UOps -> .rknn (no onnx/toolkit) -> run on NPU
 ├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
 │   └── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
