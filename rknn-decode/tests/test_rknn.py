@@ -7,10 +7,12 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # make project root importable
 
 import glob, time, urllib.request
+import numpy as np
 import pytest
 pytest.importorskip("rknn")                            # rknn-toolkit2
 from helpers.rknn_export import onnx_to_rknn, onnx_to_rknn_bytes
-from add_ops.viz import build_model, show_rknn
+from helpers.rknn_run import run_rknn
+from add_ops.viz import build_model, build_rknn, show_rknn
 
 def test_export_bytes_in_memory():
   before = set(glob.glob("/dev/shm/rknn_*"))
@@ -33,6 +35,17 @@ def test_export_writes_rknn_file(tmp_path):
   assert os.path.exists(out)
   with open(out, "rb") as f:
     assert f.read(4) == b"RKNN"                         # exported file carries the RKNN magic
+
+def test_run_on_npu_matches_add():
+  N = 25
+  A = (np.arange(N) % 100).astype(np.float16)
+  B = np.full(N, 10, dtype=np.float16)
+  try:
+    out = run_rknn(build_rknn(), [A, B], target="rk3588")
+  except RuntimeError as e:
+    pytest.skip(f"NPU runtime unavailable: {e}")        # not running on the device
+  got = np.array(out[0]).reshape(-1)[:N]
+  np.testing.assert_allclose(got, A + B)
 
 def test_quantization_without_dataset_raises(tmp_path):
   out = str(tmp_path / "unused.rknn")

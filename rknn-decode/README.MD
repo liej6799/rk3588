@@ -14,11 +14,13 @@ rknn-decode/
 │   ├── interp.py       #   run_uops(uops, buffers): execute a range-free graph
 │   ├── onnx_export.py  #   uops_to_onnx(uops): build an ONNX graph from a range-free graph
 │   ├── rknn_export.py  #   onnx_to_rknn_bytes(model): build a .rknn for the RK3588 NPU (in RAM)
-│   └── viz.py          #   serve(model): host an ONNX model in netron
+│   ├── rknn_run.py     #   run_rknn(model, inputs): run a .rknn on the NPU
+│   └── viz.py          #   serve(model): host an ONNX/.rknn model in netron
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
 │   ├── run.py          #   load the uops, then fully unroll and print
-│   └── viz.py          #   build the ONNX graph and host it in netron
+│   ├── run_rknn.py     #   export to .rknn and run it on the NPU, checking a + b
+│   └── viz.py          #   host the ONNX graph (or exported .rknn) in netron
 ├── tests/              # pytest suite for helpers + the example
 │   ├── test_uop.py
 │   ├── test_unroll.py
@@ -77,6 +79,25 @@ python3 -m add_ops.viz --rknn          # export to .rknn and serve on http://0.0
 ```
 
 Or from code: `from add_ops.viz import show_rknn; show_rknn()`.
+
+### Run the .rknn on the NPU
+
+Export the model and run it on the RK3588 NPU, checking the result equals `a + b`:
+
+```sh
+.venv/bin/python3 -m add_ops.run_rknn
+```
+
+Or from code:
+
+```python
+from add_ops.viz import build_rknn
+from helpers.rknn_run import run_rknn
+out = run_rknn(build_rknn(), [a, b], target="rk3588")  # list of output arrays
+```
+
+This needs the on-device NPU runtime (`librknnrt.so`); pass `target=None` to use the
+toolkit's simulator instead.
 
 Exports float16 by default; pass `do_quantization=True` with a `dataset` file (one
 input-sample path per line) for a quantized model.
