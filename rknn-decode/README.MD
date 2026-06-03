@@ -16,6 +16,7 @@ rknn-decode/
 │   ├── rknn_export.py  #   onnx_to_rknn_bytes(model): build a .rknn for the RK3588 NPU (in RAM)
 │   ├── rknn_run.py     #   run_rknn(model, inputs) / print_rknn_graph(model): run / print a .rknn on the NPU
 │   ├── rknn_decode.py  #   decode_rknn(model): disassemble a .rknn (FlatBuffer graph + NPU command queue)
+│   ├── rknn_encode.py  #   recreate_rknn(model): rebuild a .rknn from its decoded form (byte-exact)
 │   └── viz.py          #   serve(model): host an ONNX/.rknn model in netron
 ├── refs/               # vendored references (no external deps)
 │   └── rkt_registers.h #   rk3588 NPU register names, used to label the decoded command queue
@@ -24,6 +25,7 @@ rknn-decode/
 │   ├── run.py          #   load the uops, then fully unroll and print
 │   ├── run_rknn.py     #   run on the NPU and compare against onnxruntime + a + b
 │   ├── disasm.py       #   build the .rknn and statically disassemble it (offline)
+│   ├── recreate.py     #   rebuild the .rknn from its decoded form, compare to the library
 │   └── viz.py          #   host the ONNX graph (or exported .rknn) in netron
 ├── tests/              # pytest suite for helpers + the example
 │   ├── test_uop.py
@@ -32,7 +34,8 @@ rknn-decode/
 │   ├── test_onnx.py    #   load -> unroll -> ONNX -> onnxruntime -> check a + b
 │   ├── test_viz.py     #   build the ONNX file + netron serves it
 │   ├── test_rknn.py    #   load -> unroll -> ONNX -> .rknn export
-│   └── test_decode.py  #   disassemble the .rknn: container + graph + command queue
+│   ├── test_decode.py  #   disassemble the .rknn: container + graph + command queue
+│   └── test_recreate.py#   rebuild the .rknn from decode and assert byte-identity + NPU run
 ├── conftest.py         # marks the project root for pytest imports
 └── README.MD
 ```
@@ -163,6 +166,29 @@ header is vendored under `refs/`).
 stream: the 25 scalar UOp adds map 1:1 to 25 compiled `Add` nodes and 25 `EW_BINARY`
 regcmd tiles (each width-1), while the 50 `LOAD`s collapse into reformat/slice tiles and
 the 25 `STORE`s into `Concat` + output reshape.
+
+### Recreate the .rknn from its decoded form (byte-exact)
+
+`recreate_rknn` is the inverse of the decoder: it rebuilds the container header **from
+scratch** and re-emits the NPU command stream from the decoded command queue. For a
+library-generated model the result is **byte-identical** (same SHA-256) and still runs
+correctly on the NPU:
+
+```sh
+.venv/bin/python3 -m add_ops.recreate        # build with toolkit, recreate, compare bytes
+```
+
+```python
+from helpers.rknn_encode import recreate_rknn
+assert recreate_rknn(open("model.rknn","rb").read()) == open("model.rknn","rb").read()
+```
+
+This proves the container + command-stream codec is lossless. The FlatBuffer metadata
+(vtables, tensor table, JSON attrs) and the trailing task tensor are carried through
+verbatim — those are the compiler-owned parts. Synthesising a body *without* the toolkit
+(its memory plan + flatc serialisation) is a separate, larger effort and yields only
+*functional* (NPU-)equivalence, not byte-identity, because the body embeds the compiler
+version string and its own memory-plan offsets.
 
 ## Tests
 
