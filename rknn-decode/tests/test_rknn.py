@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 pytest.importorskip("rknn")                            # rknn-toolkit2
 from helpers.rknn_export import onnx_to_rknn, onnx_to_rknn_bytes
-from helpers.rknn_run import run_rknn
+from helpers.rknn_run import run_rknn, print_rknn_graph
 from add_ops.viz import build_model, build_rknn, show_rknn
 
 def test_export_bytes_in_memory():
@@ -59,6 +59,12 @@ def test_npu_matches_onnxruntime():
   sess = ort.InferenceSession(build_model().SerializeToString(), providers=["CPUExecutionProvider"])
   onnx = sess.run(None, {"input1": A, "input2": B})[0].reshape(-1)[:N].astype(np.float32)
   np.testing.assert_array_equal(npu, onnx)              # NPU bit-matches onnxruntime on this kernel
+
+def test_print_rknn_graph_runs():
+  try:
+    print_rknn_graph(build_rknn(), target="rk3588")     # prints the compiled layer table via eval_perf
+  except RuntimeError as e:
+    pytest.skip(f"NPU runtime unavailable: {e}")         # not running on the device
 
 def test_quantization_without_dataset_raises(tmp_path):
   out = str(tmp_path / "unused.rknn")

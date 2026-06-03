@@ -12,9 +12,9 @@ rknn-decode/
 │   ├── uop.py          #   minimal UOp / Ops / dtypes / AxisType / KernelInfo + simplify/substitute/toposort
 │   ├── unroll.py       #   fully_unroll(uops): expand constant-bound RANGE loops
 │   ├── interp.py       #   run_uops(uops, buffers): execute a range-free graph
-│   ├── onnx_export.py  #   uops_to_onnx(uops): build an ONNX graph from a range-free graph
+│   ├── onnx_export.py  #   uops_to_onnx(uops) / print_onnx_graph(model): build + print an ONNX graph
 │   ├── rknn_export.py  #   onnx_to_rknn_bytes(model): build a .rknn for the RK3588 NPU (in RAM)
-│   ├── rknn_run.py     #   run_rknn(model, inputs): run a .rknn on the NPU
+│   ├── rknn_run.py     #   run_rknn(model, inputs) / print_rknn_graph(model): run / print a .rknn on the NPU
 │   └── viz.py          #   serve(model): host an ONNX/.rknn model in netron
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
@@ -89,6 +89,20 @@ Run the model on the RK3588 NPU and compare against onnxruntime (and `a + b`):
 ```
 
 On this kernel the NPU output bit-matches onnxruntime exactly (max abs diff 0.0).
+
+### Print the graphs
+
+Dump the logical ONNX graph and the compiled NPU layer table side by side:
+
+```sh
+.venv/bin/python3 -m add_ops.run_rknn --graph
+```
+
+The ONNX listing shows the op graph (`Gather`/`Add`/`Concat`); the rknn side prints
+the toolkit's `eval_perf` layer table — the lowered NPU ops that netron hides inside
+the un-expandable NNBG node. From code: `print_onnx_graph(model)` and
+`print_rknn_graph(model)`. (rknn-toolkit2 has no rknn->onnx export, so the .rknn graph
+is only available as this text table, not as an ONNX file.)
 
 Or from code:
 

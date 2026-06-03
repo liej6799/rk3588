@@ -57,3 +57,17 @@ def uops_to_onnx(uops: list, name: str = "kernel"):
 
   graph = helper.make_graph(nodes, name, inputs, [output], initializer=inits)
   return helper.make_model(graph, producer_name="rknn-decode", opset_imports=[helper.make_opsetid("", 13)])
+
+def print_onnx_graph(model) -> None:
+  """Print an ONNX ModelProto as a readable node listing (op_type, inputs -> outputs).
+
+  Initializer (constant) inputs are marked with a trailing '*'.
+  """
+  g = model.graph
+  inits = {i.name for i in g.initializer}
+  print(f"=== ONNX graph '{g.name}' ({len(g.node)} nodes) ===")
+  print(f"inputs : {[i.name for i in g.input]}")
+  print(f"outputs: {[o.name for o in g.output]}")
+  for i, n in enumerate(g.node):
+    ins = [f"{s}*" if s in inits else s for s in n.input]      # '*' = initializer/constant
+    print(f"{i:3d}: {n.op_type:8s} {ins} -> {list(n.output)}")

@@ -38,3 +38,30 @@ def run_rknn(model, inputs, target: str = "rk3588", core_mask: int = 0, verbose:
   finally:
     rknn.release()
     if work is not None: shutil.rmtree(work, ignore_errors=True)
+
+def print_rknn_graph(model, target: str = "rk3588", core_mask: int = 0, verbose: bool = False) -> None:
+  """Print the compiled NPU layer graph of a .rknn (bytes or path).
+
+  Uses the toolkit's eval_perf() table, which lists every compiled layer with its
+  op type, datatype, CPU/NPU target, and shapes -- i.e. the contents that netron
+  shows as the un-expandable NNBG node. `target=None` uses the simulator. Raises
+  RuntimeError if the runtime is unavailable.
+  """
+  from rknn.api import RKNN
+
+  work = None
+  if isinstance(model, (bytes, bytearray)):
+    work = tempfile.mkdtemp(prefix="rknn_", dir=_tmpfs_dir())   # RAM-backed scratch
+    path = os.path.join(work, "model.rknn")
+    with open(path, "wb") as f: f.write(model)
+    model = path
+
+  rknn = RKNN(verbose=verbose)
+  try:
+    if rknn.load_rknn(model) != 0: raise RuntimeError(f"rknn.load_rknn failed for {model}")
+    if rknn.init_runtime(target=target, core_mask=core_mask, perf_debug=True) != 0:
+      raise RuntimeError(f"rknn.init_runtime failed (target={target}); is the NPU runtime available?")
+    rknn.eval_perf()                                           # prints the compiled layer table
+  finally:
+    rknn.release()
+    if work is not None: shutil.rmtree(work, ignore_errors=True)

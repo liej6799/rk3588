@@ -6,7 +6,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 from helpers.unroll import fully_unroll
-from helpers.onnx_export import uops_to_onnx
+from helpers.onnx_export import uops_to_onnx, print_onnx_graph
 from add_ops.uops import load_uops
 
 N = 25
@@ -25,6 +25,13 @@ def test_onnx_model_is_valid():
   assert ops.count("Add") == N
   assert ops.count("Concat") == 1
   assert [o.name for o in model.graph.output] == ["output"]
+
+def test_print_onnx_graph(capsys):
+  print_onnx_graph(_model())
+  out = capsys.readouterr().out
+  assert "ONNX graph 'add_5x5' (76 nodes)" in out      # 50 Gather + 25 Add + 1 Concat
+  assert out.count(": Gather") == 2 * N
+  assert out.count(": Add") == N and out.count(": Concat") == 1
 
 def test_onnx_runs_and_matches_add():
   sess = ort.InferenceSession(_model().SerializeToString(), providers=["CPUExecutionProvider"])
