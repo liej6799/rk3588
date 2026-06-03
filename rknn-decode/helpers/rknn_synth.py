@@ -6,10 +6,10 @@ element count N, and emits the .rknn (FlatBuffer body + NPU register-command str
 container) from scratch via the vendored builders (`_rknn_flatbuf` + `_rc_template_gen`,
 which depend only on the `flatbuffers` library).
 
-    from helpers.unroll import fully_unroll
     from add_ops.uops import make_add_uops
-    from helpers.rknn_synth import uops_to_rknn
+    from helpers.rknn_synth import uops_to_rknn, run_uops_on_npu
     blob = uops_to_rknn(fully_unroll(make_add_uops(25)))   # bytes; no onnx, no toolkit
+    z = run_uops_on_npu(make_add_uops(25), [a, b])         # one call: UOps -> NPU result
 
 Scope: 2-input fp16 element-wise add (`z = a + b`) for N = 1..50,231,944. The command
 buffer is generated from `_rc_template_gen` (the readable regcmd generator), not copied
@@ -18,6 +18,7 @@ from any library output.
 import math
 
 from .uop import Ops
+from .unroll import fully_unroll
 from . import _rknn_flatbuf as _fb
 
 
@@ -68,3 +69,25 @@ def uops_to_rknn(uops, rows: int | None = None, cols: int | None = None) -> byte
     rows, cols = (s, s) if s * s == N else (1, N)
   body = _fb.build_body(N, 2)                          # FlatBuffer + regcmd, from scratch
   return _fb.assemble_rknn(body, rows, cols, 2)        # + 64-byte header + JSON trailer
+
+
+def run_uops_on_npu(uops, inputs, target: str = "rk3588",
+                    rows: int | None = None, cols: int | None = None):
+  """Run a UOp add graph directly on the NPU. Returns the output as a flat array of N.
+
+  Accepts the original (loop) UOps or an already-unrolled list; any RANGE loops are
+  fully unrolled first. `inputs` is the list of input arrays (one per input PARAM, e.g.
+  [a, b] as fp16 ndarrays). End to end this is: UOps -> unroll -> synthesize .rknn
+  (no onnx, no toolkit) -> run on the NPU. rknn-toolkit2 is used only to submit to the
+  NPU, not to build the model.
+  """
+  from .rknn_run import run_rknn                       # lazy: keeps the build path toolkit-free
+
+  if any(u.op is Ops.RANGE for u in uops):
+    uops = fully_unroll(uops)
+  N = analyze_add(uops)
+  if len(inputs) != 2:
+    raise ValueError(f"expected 2 input arrays (a, b), got {len(inputs)}")
+  blob = uops_to_rknn(uops, rows, cols)
+  out = run_rknn(blob, list(inputs), target=target)
+  return out[0].reshape(-1)[:N]

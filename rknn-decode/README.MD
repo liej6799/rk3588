@@ -211,10 +211,15 @@ scratch — the FlatBuffer body, the **NPU register-command stream** (generated 
 
 ```python
 from helpers.unroll import fully_unroll
-from helpers.rknn_synth import uops_to_rknn
+from helpers.rknn_synth import uops_to_rknn, run_uops_on_npu
 from add_ops.uops import make_add_uops
 blob = uops_to_rknn(fully_unroll(make_add_uops(25)))   # bytes; no onnx, no toolkit
+z = run_uops_on_npu(make_add_uops(25), [a, b])         # one call: UOps -> NPU result array
 ```
+
+`run_uops_on_npu(uops, [a, b])` is the whole pipeline in one call: it unrolls any RANGE
+loops, synthesizes the `.rknn` from scratch, submits it to the NPU, and returns the
+output array. It accepts the original loop UOps or an already-unrolled list.
 
 Verified on the NPU for 1×1, 3×3, 5×5 (`z == a + b`, see `tests/test_synth.py`). The
 build never imports `rknn` — only the `flatbuffers` library.

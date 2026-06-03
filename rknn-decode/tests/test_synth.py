@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 import numpy as np
 import pytest
 from helpers.unroll import fully_unroll
-from helpers.rknn_synth import uops_to_rknn, analyze_add
+from helpers.rknn_synth import uops_to_rknn, analyze_add, run_uops_on_npu
 from helpers.rknn_decode import decode_rknn, split_container
 from add_ops.uops import make_add_uops
 
@@ -53,3 +53,19 @@ def test_synth_runs_on_npu(rows, cols):
     pytest.skip(f"NPU runtime unavailable: {e}")
   got = np.array(out[0]).reshape(-1)[:N]
   np.testing.assert_allclose(got, A + B)               # toolkit-free model computes a + b
+
+@pytest.mark.parametrize("rows,cols", SIZES)
+def test_run_uops_on_npu_one_call(rows, cols):
+  # the one-call helper: original (loop) UOps straight to an NPU result
+  N = rows * cols
+  A = (np.arange(N) % 7).astype(np.float16)
+  B = np.full(N, 3, dtype=np.float16)
+  try:
+    z = run_uops_on_npu(make_add_uops(N), [A, B], rows=rows, cols=cols)
+  except RuntimeError as e:
+    pytest.skip(f"NPU runtime unavailable: {e}")
+  np.testing.assert_allclose(np.asarray(z).reshape(-1)[:N], A + B)
+
+def test_run_uops_on_npu_rejects_wrong_input_count():
+  with pytest.raises(ValueError):
+    run_uops_on_npu(make_add_uops(4), [np.zeros(4, np.float16)])   # needs exactly 2 inputs
