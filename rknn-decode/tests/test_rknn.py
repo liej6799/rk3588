@@ -47,6 +47,19 @@ def test_run_on_npu_matches_add():
   got = np.array(out[0]).reshape(-1)[:N]
   np.testing.assert_allclose(got, A + B)
 
+def test_npu_matches_onnxruntime():
+  import onnxruntime as ort
+  N = 25
+  A = (np.arange(N) % 100).astype(np.float16)
+  B = np.full(N, 10, dtype=np.float16)
+  try:
+    npu = np.array(run_rknn(build_rknn(), [A, B], target="rk3588")[0]).reshape(-1)[:N].astype(np.float32)
+  except RuntimeError as e:
+    pytest.skip(f"NPU runtime unavailable: {e}")        # not running on the device
+  sess = ort.InferenceSession(build_model().SerializeToString(), providers=["CPUExecutionProvider"])
+  onnx = sess.run(None, {"input1": A, "input2": B})[0].reshape(-1)[:N].astype(np.float32)
+  np.testing.assert_array_equal(npu, onnx)              # NPU bit-matches onnxruntime on this kernel
+
 def test_quantization_without_dataset_raises(tmp_path):
   out = str(tmp_path / "unused.rknn")
   with pytest.raises(ValueError):

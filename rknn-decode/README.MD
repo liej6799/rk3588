@@ -19,7 +19,7 @@ rknn-decode/
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
 │   ├── run.py          #   load the uops, then fully unroll and print
-│   ├── run_rknn.py     #   export to .rknn and run it on the NPU, checking a + b
+│   ├── run_rknn.py     #   run on the NPU and compare against onnxruntime + a + b
 │   └── viz.py          #   host the ONNX graph (or exported .rknn) in netron
 ├── tests/              # pytest suite for helpers + the example
 │   ├── test_uop.py
@@ -82,11 +82,13 @@ Or from code: `from add_ops.viz import show_rknn; show_rknn()`.
 
 ### Run the .rknn on the NPU
 
-Export the model and run it on the RK3588 NPU, checking the result equals `a + b`:
+Run the model on the RK3588 NPU and compare against onnxruntime (and `a + b`):
 
 ```sh
 .venv/bin/python3 -m add_ops.run_rknn
 ```
+
+On this kernel the NPU output bit-matches onnxruntime exactly (max abs diff 0.0).
 
 Or from code:
 
