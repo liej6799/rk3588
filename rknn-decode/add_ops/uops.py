@@ -6,13 +6,18 @@ library, so it stays disconnected from tinygrad.
 """
 from helpers.uop import Ops, UOp, AxisType, KernelInfo, dtypes
 
-def load_uops() -> list[UOp]:
-  """Return the original 14 UOps for the 5x5 half add (copied snapshot)."""
-  hp = dtypes.half.ptr(25)
+def make_add_uops(n: int = 25) -> list[UOp]:
+  """Build the original (non-unrolled) linearized UOps for an `n`-element half `a + b`.
+
+  Same shape as the tinygrad-captured snapshot, generalized to any element count: a
+  single constant-bound RANGE over `n` with body `out[i] = a[i] + b[i]`. Pure
+  project-local `helpers.uop` (no tinygrad).
+  """
+  hp = dtypes.half.ptr(n)
   u0  = UOp(Ops.PARAM, hp, (), 0)                       # output
   u1  = UOp(Ops.PARAM, hp, (), 1)                       # input a
   u2  = UOp(Ops.PARAM, hp, (), 2)                       # input b
-  u3  = UOp(Ops.CONST, dtypes.int, (), 25)              # loop bound
+  u3  = UOp(Ops.CONST, dtypes.int, (), n)               # loop bound
   u4  = UOp(Ops.RANGE, dtypes.int, (u3,), (0, AxisType.LOOP))
   u5  = UOp(Ops.INDEX, hp, (u1, u4))
   u6  = UOp(Ops.LOAD, dtypes.half, (u5,))
@@ -22,8 +27,12 @@ def load_uops() -> list[UOp]:
   u10 = UOp(Ops.ADD, dtypes.half, (u6, u8))
   u11 = UOp(Ops.STORE, dtypes.void, (u9, u10))
   u12 = UOp(Ops.END, dtypes.void, (u11, u4))
-  u13 = UOp(Ops.SINK, dtypes.void, (u12,), KernelInfo(name="E_25"))
+  u13 = UOp(Ops.SINK, dtypes.void, (u12,), KernelInfo(name=f"E_{n}"))
   return [u0, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13]
+
+def load_uops() -> list[UOp]:
+  """Return the original 14 UOps for the 5x5 half add (copied snapshot)."""
+  return make_add_uops(25)
 
 if __name__ == "__main__":
   uops = load_uops()
