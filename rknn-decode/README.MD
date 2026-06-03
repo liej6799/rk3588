@@ -26,6 +26,8 @@ rknn-decode/
 ├── add2d_ops/          # example: 2D nested-loop half add (N=100), index i*cols+j
 │   ├── uops.py         #   make_add2d_uops(rows, cols): two RANGE loops + computed index
 │   └── synth.py        #   2D-loop UOps -> .rknn (no onnx/toolkit) -> run on NPU
+├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
+│   └── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
 │   ├── run.py          #   load the uops, then fully unroll and print
@@ -44,7 +46,8 @@ rknn-decode/
 │   ├── test_decode.py  #   disassemble the .rknn: container + graph + command queue
 │   ├── test_recreate.py#   rebuild the .rknn from decode and assert byte-identity + NPU run
 │   ├── test_synth.py   #   UOps -> .rknn (no onnx/toolkit) for 1x1/3x3/5x5, run on NPU
-│   └── test_add2d.py   #   2D nested-loop add (N=100): unroll -> synth -> run on NPU
+│   ├── test_add2d.py   #   2D nested-loop add (N=100): unroll -> synth -> run on NPU
+│   └── test_matmul.py  #   matmul (REDUCE): unroll -> interp == numpy; synth rejects it
 ├── conftest.py         # marks the project root for pytest imports
 └── README.MD
 ```
@@ -232,7 +235,16 @@ treats it identically — verified on the NPU for N=100 (10×10):
 
 ```sh
 .venv/bin/python3 -m add2d_ops.synth          # 10x10 = 100, toolkit-free, run on NPU
-``` This is **functional**
+```
+
+**Reductions / matmul (`matmul_ops`).** The UOp layer also handles `Ops.REDUCE`: a matmul
+`out[i,j] = Σ_k a[i,k]·b[k,j]` (three loops, one of them a `REDUCE`) builds, and
+`fully_unroll` expands the contraction into an explicit sum-of-products — verified against
+numpy by the pure-Python interpreter (`tests/test_matmul.py`). But matmul is **not** an
+element-wise add, so `uops_to_rknn` deliberately rejects it: the NPU matmul/conv engine
+(the `CNA`/`CORE` blocks) is a separate command stream that the toolkit-free synthesizer
+does not emit. So matmul is reproducible/verifiable at the UOp level, but not yet runnable
+on the NPU toolkit-free. This is **functional**
 equivalence: the synthesized file computes the same result, but it is not byte-identical
 to a toolkit build (it uses a compact single-tile / multi-surface memory plan instead of
 the compiler's per-element `Split`/`Concat` layout). The builders are vendored under

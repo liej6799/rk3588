@@ -42,10 +42,13 @@ def analyze_add(uops) -> int:
     out_params.add(idx.src[0].arg)
     out_offsets.append(idx.src[1].arg)
     if val.op is not Ops.ADD or len(val.src) != 2:
-      raise ValueError("only 2-operand element-wise ADD is supported")
+      raise ValueError("only a 2-operand element-wise ADD (z = a + b) is supported")
     for ld in val.src:
       if ld.op is not Ops.LOAD or ld.src[0].op is not Ops.INDEX or ld.src[0].src[0].op is not Ops.PARAM:
-        raise ValueError("ADD operands must be LOAD(INDEX(PARAM, CONST))")
+        raise ValueError(
+          "not a simple element-wise add: each ADD operand must be LOAD(INDEX(PARAM, CONST)). "
+          "Kernels with MUL/REDUCE (e.g. matmul) are not supported by the toolkit-free "
+          "synthesizer (the NPU matmul/conv engine is a separate, un-ported command stream).")
       in_params.add(ld.src[0].src[0].arg)
   if len(out_params) != 1:
     raise ValueError(f"expected exactly one output PARAM, got {sorted(out_params)}")

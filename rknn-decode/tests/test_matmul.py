@@ -1,0 +1,48 @@
+"""Matmul UOps (REDUCE): build, unroll the contraction, verify the math in pure Python.
+
+This kernel is a reduction (out = a @ b), not an element-wise add. It exercises
+Ops.REDUCE / .reduce() and confirms:
+  - fully_unroll expands the REDUCE loop into an explicit sum-of-products,
+  - the pure-Python interpreter matches numpy matmul,
+  - the toolkit-free .rknn synthesizer correctly REJECTS it (add-only).
+No NPU is involved.
+"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # make project root importable
+
+import numpy as np
+import pytest
+from helpers.uop import Ops
+from helpers.unroll import fully_unroll
+from helpers.interp import run_uops
+from helpers.rknn_synth import uops_to_rknn
+from matmul_ops.uops import make_matmul_uops
+
+def test_build_has_reduce():
+  uops = make_matmul_uops(8)
+  assert sum(u.op is Ops.RANGE for u in uops) == 3        # i, j loops + k reduce
+  assert sum(u.op is Ops.REDUCE for u in uops) == 1
+  assert sum(u.op is Ops.STORE for u in uops) == 1
+
+def test_unroll_expands_reduce():
+  unr = fully_unroll(make_matmul_uops(8))
+  assert sum(u.op is Ops.RANGE for u in unr) == 0
+  assert sum(u.op is Ops.REDUCE for u in unr) == 0        # the contraction is expanded out
+  assert sum(u.op is Ops.STORE for u in unr) == 64        # 8x8 outputs
+  assert sum(u.op is Ops.MUL for u in unr) == 64 * 8      # 8 products per output
+  assert sum(u.op is Ops.ADD for u in unr) == 64 * 7      # summed with a 7-deep add chain
+
+@pytest.mark.parametrize("n", [2, 4, 8])
+def test_interp_matches_numpy_matmul(n):
+  unr = fully_unroll(make_matmul_uops(n))
+  rng = np.random.default_rng(n)
+  A = rng.integers(0, 5, size=n * n).astype(np.float64)
+  B = rng.integers(0, 5, size=n * n).astype(np.float64)
+  out = [0.0] * (n * n)
+  run_uops(unr, {0: out, 1: list(A), 2: list(B)})
+  ref = (A.reshape(n, n) @ B.reshape(n, n)).reshape(-1)
+  assert np.allclose(np.array(out), ref)
+
+def test_synth_rejects_matmul():
+  with pytest.raises(ValueError, match="element-wise add|matmul"):
+    uops_to_rknn(fully_unroll(make_matmul_uops(8)))        # add-only synthesizer

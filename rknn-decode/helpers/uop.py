@@ -18,7 +18,7 @@ class Ops(Enum):
   # buffers / values
   PARAM = auto(); CONST = auto(); DEFINE_VAR = auto()
   # control / indexing
-  RANGE = auto(); END = auto(); SINK = auto(); INDEX = auto(); GEP = auto(); CAST = auto(); STACK = auto()
+  RANGE = auto(); END = auto(); SINK = auto(); INDEX = auto(); GEP = auto(); CAST = auto(); STACK = auto(); REDUCE = auto()
   # memory
   LOAD = auto(); STORE = auto()
   # alu
@@ -95,6 +95,10 @@ class UOp:
   def load(self) -> "UOp": return UOp(Ops.LOAD, self.dtype.base if isinstance(self.dtype, PtrDType) else self.dtype, (self,))
   def store(self, val: "UOp") -> "UOp": return UOp(Ops.STORE, dtypes.void, (self, val))
   def end(self, *rngs: "UOp") -> "UOp": return UOp(Ops.END, dtypes.void, (self, *rngs))
+  def reduce(self, *rngs: "UOp", arg) -> "UOp":
+    # reduce self over the given RANGE(s); arg=(op, ...) e.g. (Ops.ADD, ()). fully_unroll
+    # expands this into the explicit op-fold over each range's concrete values.
+    return UOp(Ops.REDUCE, self.dtype, (self, *rngs), arg)
 
   # --- arithmetic (tinygrad-style): an INDEX used as a value is implicitly LOADed ---
   def _rval(self) -> "UOp": return self.load() if self.op is Ops.INDEX else self
