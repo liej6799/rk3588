@@ -1,0 +1,10 @@
+# virtualenv
+.venv/
+
+# python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# generated models
+*.onnx
