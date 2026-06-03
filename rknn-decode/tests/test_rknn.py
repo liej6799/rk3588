@@ -6,17 +6,26 @@ Run with the project venv:  .venv/bin/python3 -m pytest tests/test_rknn.py
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # make project root importable
 
-import glob
+import glob, time, urllib.request
 import pytest
 pytest.importorskip("rknn")                            # rknn-toolkit2
 from helpers.rknn_export import onnx_to_rknn, onnx_to_rknn_bytes
-from add_ops.viz import build_model
+from add_ops.viz import build_model, show_rknn
 
 def test_export_bytes_in_memory():
   before = set(glob.glob("/dev/shm/rknn_*"))
   blob = onnx_to_rknn_bytes(build_model())
   assert isinstance(blob, bytes) and blob[:4] == b"RKNN"   # got the .rknn back as bytes
   assert set(glob.glob("/dev/shm/rknn_*")) == before       # tmpfs scratch dir cleaned up, nothing persists
+
+def test_show_rknn_hosts_from_memory():
+  netron = pytest.importorskip("netron")
+  host, port = show_rknn(address=("127.0.0.1", 8098))      # export -> serve the .rknn from bytes, no file
+  try:
+    time.sleep(1)
+    assert urllib.request.urlopen(f"http://{host}:{port}/", timeout=5).getcode() == 200
+  finally:
+    netron.stop()
 
 def test_export_writes_rknn_file(tmp_path):
   out = str(tmp_path / "add_5x5.rknn")

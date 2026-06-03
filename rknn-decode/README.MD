@@ -70,6 +70,14 @@ blob = onnx_to_rknn_bytes(build_model())               # bytes; float16; target_
 Want a file instead? `onnx_to_rknn(model, "add_5x5.rknn")` wraps it and writes the
 bytes out.
 
+Visualize the exported `.rknn` in netron (also served from memory):
+
+```sh
+python3 -m add_ops.viz --rknn          # export to .rknn and serve on http://0.0.0.0:8080
+```
+
+Or from code: `from add_ops.viz import show_rknn; show_rknn()`.
+
 Exports float16 by default; pass `do_quantization=True` with a `dataset` file (one
 input-sample path per line) for a quantized model.
 
