@@ -44,6 +44,9 @@ _RDMA_EW   = ("DPU_RDMA", 0x5034)  # ERDMA_CFG: bits[31:30] data-mode set => 2nd
 _RDMA_SRC2 = ("DPU_RDMA", 0x5038)  # operand 1 DMA base (runtime-patched)
 _ALU_FORMAT, _REFORMAT = 0x48000002, 0x24000001
 _MODE_NAMES = {_ALU_FORMAT: "alu", _REFORMAT: "reformat"}
+# EW_CFG (0x4070) bitfields, from rkt_registers.h
+_EW_BYPASS = 0x01    # bit0: elementwise engine bypassed (pure copy/passthrough)
+_EW_OP_SRC = 0x40    # bit6: second ALU operand sourced from memory (=> binary op)
 
 
 def _load_reg_names():
@@ -186,10 +189,13 @@ def _classify(regs):
       targets[t] = targets.get(t, 0) + 1
     return "OTHER", " ".join(f"{t}:{c}" for t, c in sorted(targets.items()))
   width = m.get(_DPU_WIDTH, 0) + 1
-  # binary (2-operand) elementwise: live-patched form sets ERDMA data-mode bit30; the
-  # stored template instead shows ALU data-format + a configured EW_CFG datapath.
-  binary = ((m.get(_RDMA_EW, 0) & 0xC0000000) != 0
-            or (mode == _ALU_FORMAT and m.get(_DPU_EWCFG, 0) != 0))
+  # binary (2-operand) elementwise: ALU data-format with the EW engine active
+  # (EW_BYPASS clear) and its second operand sourced from memory (EW_OP_SRC set).
+  # These bits are baked in the file (not runtime-patched), so they hold for both
+  # the stored template and a live command buffer. EW_OP_SRC clear => 1-operand copy
+  # (e.g. the Split/Slice/reshape data-movement tiles).
+  ew = m.get(_DPU_EWCFG, 0)
+  binary = mode == _ALU_FORMAT and (ew & _EW_OP_SRC) and not (ew & _EW_BYPASS)
   mode_name = _MODE_NAMES.get(mode, f"mode=0x{mode:x}")
   kind = ("EW_BINARY" if binary else "COPY") + f"/{mode_name}"
   detail = f"w={width} out=0x{m.get(_DPU_OUT, 0):08x} in0=0x{m.get(_RDMA_SRC, 0):08x}"

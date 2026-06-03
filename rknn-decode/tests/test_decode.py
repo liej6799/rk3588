@@ -44,6 +44,16 @@ def test_command_queue(model_bytes):
     for target, off, name, val in b["regs"]:
       assert isinstance(off, int) and isinstance(val, int) and isinstance(name, str)
 
+def test_add_tiles_map_one_to_one(model_bytes):
+  # the core UOp<->rknn invariant (see MAPPING.md): the 25 scalar UOp adds become
+  # 25 compiled Add nodes and 25 binary-elementwise regcmd tiles, one per element.
+  d = decode_rknn(model_bytes)
+  ew_tiles = [b for b in d["command_queue"] if b["kind"].startswith("EW_BINARY")]
+  add_nodes = [n for n in d["nodes"] if n["op"] == "Add"]
+  assert len(ew_tiles) == len(add_nodes) == 25
+  for b in ew_tiles:
+    assert b["detail"].startswith("w=1")              # each add tile processes 1 element
+
 def test_reg_names_and_decode():
   assert REG_NAMES[0x4030] == "DPU_DATA_CUBE_WIDTH"     # parsed from refs/rkt_registers.h
   # word = target<<48 | value<<16 | reg

@@ -153,10 +153,16 @@ print_rknn_disasm(m)
 Each `.rknn` is `[64-byte header][FlatBuffer body][u64 len + JSON trailer]`; the body's
 `regcmd` tensor is a flat array of `target<<48 | value<<16 | reg` words grouped into
 per-tile blocks. Blocks are classified `EW_BINARY` (the Add tiles), `COPY/reformat`
-(reshape/convert), or `OTHER`. The DMA base-address fields read 0 — the runtime patches
-those per tile at submit time; the geometry (width/height/channel/stride) is already
-baked in the file. This is the disassembly direction of the decode work; it has no
-external dependencies (the register header is vendored under `refs/`).
+(reshape/convert), `COPY/alu` (split/slice data movement), or `OTHER`. The DMA
+base-address fields read 0 — the runtime patches those per tile at submit time; the
+geometry (width/height/channel/stride) is already baked in the file. This is the
+disassembly direction of the decode work; it has no external dependencies (the register
+header is vendored under `refs/`).
+
+**[MAPPING.md](MAPPING.md)** traces how the unrolled UOps line up with this command
+stream: the 25 scalar UOp adds map 1:1 to 25 compiled `Add` nodes and 25 `EW_BINARY`
+regcmd tiles (each width-1), while the 50 `LOAD`s collapse into reformat/slice tiles and
+the 25 `STORE`s into `Concat` + output reshape.
 
 ## Tests
 
