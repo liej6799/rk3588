@@ -42,3 +42,57 @@ def fully_unroll(uops: list[UOp]) -> list[UOp]:
   new_stores = [_expand_reduce(st.substitute(dict(combo))).simplify()
                 for combo in combos for st in stores]
   return list(UOp.sink(*new_stores, arg=sink.arg).toposort())
+
+
+def upcast_elementwise(uops: list[UOp], vec: int = 4) -> list[UOp]:
+  """Vectorize a 2-input element-wise op into vec(`vec`) loads/stores.
+
+  Reproduces tinygrad's `OptOps.UPCAST` rendering: instead of N scalar stores, emit N/vec
+  groups, each a `CAST` of the base pointer to a vec(`vec`) pointer, a vector `LOAD` per
+  input, per-lane `GEP` + scalar op, a `STACK` of the lanes, and one vector `STORE` -- in
+  the same emission order tinygrad uses. Requires a fully-unrolled element-wise add/mul
+  whose element count N is divisible by `vec`.
+  """
+  unr = fully_unroll(uops)
+  stores = {s.src[0].src[1].arg: s for s in unr if s.op is Ops.STORE}
+  N = len(stores)
+  if N % vec != 0:
+    raise ValueError(f"element count N={N} is not divisible by vec={vec}")
+  st0 = stores[0]
+  op = st0.src[1].op
+  if op not in (Ops.ADD, Ops.MUL) or len(st0.src[1].src) != 2:
+    raise ValueError("upcast supports a 2-operand element-wise ADD or MUL")
+  out_p = st0.src[0].src[0]
+  a_p = st0.src[1].src[0].src[0].src[0]
+  b_p = st0.src[1].src[1].src[0].src[0]
+  base = out_p.dtype.base                       # half
+  sz = out_p.dtype.size                         # N
+  vptr, vt = base.vec(vec).ptr(sz), base.vec(vec)
+  ki = next(u for u in unr if u.op is Ops.SINK).arg
+
+  out_list, seen = [], set()
+  def emit(u):
+    if id(u) not in seen:
+      seen.add(id(u)); out_list.append(u)
+    return u
+
+  store_uops = []
+  for g in range(N // vec):
+    c = UOp.const(dtypes.int, g * vec)
+    oi, oc = out_p.index(c), None
+    oc = UOp(Ops.CAST, vptr, (oi,))
+    ai = a_p.index(c); ac = UOp(Ops.CAST, vptr, (ai,)); al = UOp(Ops.LOAD, vt, (ac,))
+    bi = b_p.index(c); bc = UOp(Ops.CAST, vptr, (bi,)); bl = UOp(Ops.LOAD, vt, (bc,))
+    emit(out_p); emit(c); emit(oi); emit(oc)
+    emit(a_p); emit(ai); emit(ac); emit(al)
+    ga0 = emit(UOp(Ops.GEP, base, (al,), (0,)))
+    emit(b_p); emit(bi); emit(bc); emit(bl)
+    gb0 = emit(UOp(Ops.GEP, base, (bl,), (0,)))
+    muls = [emit(UOp(op, base, (ga0, gb0)))]
+    for lane in range(1, vec):
+      ga = emit(UOp(Ops.GEP, base, (al,), (lane,)))
+      gb = emit(UOp(Ops.GEP, base, (bl,), (lane,)))
+      muls.append(emit(UOp(op, base, (ga, gb))))
+    stk = emit(UOp(Ops.STACK, vt, tuple(muls)))
+    store_uops.append(emit(UOp(Ops.STORE, dtypes.void, (oc, stk))))
+  return out_list + [UOp(Ops.SINK, dtypes.void, tuple(store_uops), ki)]

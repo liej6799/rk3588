@@ -10,7 +10,7 @@ manipulated here — e.g. fully unrolling their loops — as a step toward RKNN 
 rknn-decode/
 ├── helpers/            # reusable, tinygrad-free helper library
 │   ├── uop.py          #   minimal UOp / Ops / dtypes / AxisType / KernelInfo + simplify/substitute/toposort
-│   ├── unroll.py       #   fully_unroll(uops): expand constant-bound RANGE loops
+│   ├── unroll.py       #   fully_unroll(uops): expand RANGE/REDUCE; upcast_elementwise: vectorize (UPCAST)
 │   ├── interp.py       #   run_uops(uops, buffers): execute a range-free graph
 │   ├── onnx_export.py  #   uops_to_onnx(uops) / print_onnx_graph(model): build + print an ONNX graph
 │   ├── rknn_export.py  #   onnx_to_rknn_bytes(model): build a .rknn for the RK3588 NPU (in RAM)
@@ -54,6 +54,7 @@ rknn-decode/
 │   ├── test_synth.py   #   UOps -> .rknn (no onnx/toolkit) for 1x1/3x3/5x5, run on NPU
 │   ├── test_add2d.py   #   2D nested-loop add (N=100): unroll -> synth -> run on NPU
 │   ├── test_mul.py     #   element-wise multiply (N=100): unroll -> synth (MUL EW op) -> NPU
+│   ├── test_upcast.py  #   upcast_elementwise == tinygrad E_25_4 (vec(4)) + interp check
 │   └── test_matmul.py  #   matmul (REDUCE): unroll -> interp == numpy; synth rejects it
 ├── conftest.py         # marks the project root for pytest imports
 └── README.MD
@@ -253,6 +254,24 @@ Add vs Mul model). `uops_to_rknn` picks the op automatically from the UOp graph
 ```sh
 .venv/bin/python3 -m mul_ops.synth            # 10x10 = 100, z = a*b, toolkit-free
 ```
+
+**Matching tinygrad's vectorized UOps (`upcast_elementwise`).** `fully_unroll` produces a
+plain *scalar* unroll (N independent `LOAD·op·STORE`). tinygrad's real linearizer applies
+optimization passes — for the 10×10 mul on CPU it picks `OptOps.UPCAST axis=0 arg=4`,
+vectorizing 4 elements into a `half.vec(4)`. `upcast_elementwise(uops, 4)` reproduces that
+rendering exactly — `CAST` base→vec(4) pointer, a vec(4) `LOAD` per input, per-lane `GEP` +
+scalar op, a `STACK`, and a vec(4) `STORE`, in tinygrad's emission order. It is
+**byte-for-byte identical** to tinygrad's `E_25_4` (579 UOps; same op/dtype/src for every
+line — verified in `tests/test_upcast.py`), and the interpreter evaluates the vectorized
+graph to the same result.
+
+```sh
+python3 -m mul_ops.run --upcast               # the vectorized vec(4) UOp listing
+```
+
+(This is a host-codegen detail: the scalar and vectorized forms compute the same thing and
+synthesize the same NPU `.rknn` — `uops_to_rknn` keys off the element count and op, not the
+vectorization.)
 
 **Reductions / matmul (`matmul_ops`).** The UOp layer also handles `Ops.REDUCE`: a matmul
 `out[i,j] = Σ_k a[i,k]·b[k,j]` (three loops, one of them a `REDUCE`) builds, and
