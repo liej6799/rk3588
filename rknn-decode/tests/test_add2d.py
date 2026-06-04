@@ -24,12 +24,17 @@ def test_build_structure():
   assert val.op is Ops.ADD and [s.op for s in val.src] == [Ops.LOAD, Ops.LOAD]
 
 def test_unroll_to_100():
-  unr = fully_unroll(make_add2d_uops(10, 10))
+  unr = fully_unroll(make_add2d_uops(10, 10), upcast=1)   # scalar form: verify loop expansion
   assert sum(u.op is Ops.RANGE for u in unr) == 0
   assert sum(u.op is Ops.STORE for u in unr) == 100      # 10*10 iterations
   assert analyze_add(unr) == 100
   # the computed index i*10 + j folds to constants covering 0..99 exactly once
   assert sorted(u.arg for u in unr if u.op is Ops.CONST) == list(range(100))
+
+def test_auto_upcast_vectorizes():
+  unr = fully_unroll(make_add2d_uops(10, 10))             # default auto-upcast (N=100 -> vec4)
+  assert sum(u.op is Ops.STORE for u in unr) == 25 and any(u.op is Ops.STACK for u in unr)
+  assert analyze_add(unr) == 100                          # still recognized as a 100-elem add
 
 def test_interp_matches_add():
   unr = fully_unroll(make_add2d_uops(10, 10))

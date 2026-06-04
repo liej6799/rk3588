@@ -21,7 +21,7 @@ def test_build_and_unroll_is_mul():
   assert sum(u.op is Ops.RANGE for u in uops) == 2
   st = next(u for u in uops if u.op is Ops.STORE)
   assert st.src[1].op is Ops.MUL                          # value is a multiply
-  unr = fully_unroll(uops)
+  unr = fully_unroll(uops, upcast=1)                       # scalar form
   N, op = analyze_elementwise(unr)
   assert N == 100 and op is Ops.MUL
   assert sum(u.op is Ops.STORE for u in unr) == 100
@@ -55,7 +55,8 @@ def test_viz_onnx_graph_is_mul():
   m = build_model()
   onnx.checker.check_model(m)
   ops = [n.op_type for n in m.graph.node]
-  assert ops.count("Mul") == 100 and ops.count("Gather") == 200 and ops.count("Concat") == 1
+  # build_model auto-upcasts (vec(4)), so the ONNX is the vectorized form
+  assert ops.count("Mul") == 100 and ops.count("Gather") == 250 and ops.count("Concat") == 26
 
 def test_disasm_synth_mul():
   from mul_ops.viz import build_rknn

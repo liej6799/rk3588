@@ -1,6 +1,6 @@
 """Vectorized (UPCAST) unroll: match tinygrad's E_25_4 rendering of the 10x10 op.
 
-upcast_elementwise reproduces tinygrad's `OptOps.UPCAST axis=0 arg=4`: N/4 groups of a
+fully_unroll auto-upcasts (UPCAST), reproducing tinygrad's `OptOps.UPCAST axis=0 arg=4`: N/4 groups of a
 CAST + vec(4) LOAD per input, per-lane GEP + scalar op, STACK, and a vec(4) STORE. The
 op counts and per-group op sequence match tinygrad exactly, and the extended interpreter
 evaluates the vectorized graph to a*b / a+b. No NPU involved.
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from collections import Counter
 import pytest
 from helpers.uop import Ops
-from helpers.unroll import upcast_elementwise
+from helpers.unroll import fully_unroll
 from helpers.interp import run_uops
 from mul_ops.uops import make_mul_uops
 from add2d_ops.uops import make_add2d_uops
@@ -25,21 +25,21 @@ TG_GROUP0 = ["PARAM", "CONST", "INDEX", "CAST", "PARAM", "INDEX", "CAST", "LOAD"
              "GEP", "MUL", "GEP", "GEP", "MUL", "STACK", "STORE"]
 
 def test_upcast_matches_tinygrad_counts():
-  uops = upcast_elementwise(make_mul_uops(10, 10), 4)
+  uops = fully_unroll(make_mul_uops(10, 10))
   assert len(uops) == 579                                   # same total as tinygrad E_25_4
   counts = Counter(u.op.name for u in uops)
   for op, n in TG_COUNTS.items():
     assert counts.get(op, 0) == n, f"{op}: {counts.get(op, 0)} != {n}"
 
 def test_upcast_group0_sequence_and_dtypes():
-  uops = upcast_elementwise(make_mul_uops(10, 10), 4)
+  uops = fully_unroll(make_mul_uops(10, 10))
   assert [u.op.name for u in uops[:26]] == TG_GROUP0        # identical emission order
   assert repr(uops[3].dtype) == "dtypes.half.vec(4).ptr(100)"   # CAST to vec(4) pointer
   assert repr(uops[7].dtype) == "dtypes.half.vec(4)"            # vec(4) LOAD
   assert uops[8].op is Ops.GEP and uops[8].arg == (0,)         # lane extract
 
 def test_upcast_interp_mul():
-  uops = upcast_elementwise(make_mul_uops(10, 10), 4)
+  uops = fully_unroll(make_mul_uops(10, 10))
   N = 100
   A = [float(i % 7) for i in range(N)]
   B = [float(i % 5 + 1) for i in range(N)]
@@ -48,7 +48,7 @@ def test_upcast_interp_mul():
   assert out == [A[i] * B[i] for i in range(N)]             # vectorized graph computes a*b
 
 def test_upcast_add():
-  uops = upcast_elementwise(make_add2d_uops(10, 10), 4)
+  uops = fully_unroll(make_add2d_uops(10, 10))
   counts = Counter(u.op.name for u in uops)
   assert counts["ADD"] == 100 and counts["STORE"] == 25 and counts["MUL"] == 0
   N = 100
@@ -58,16 +58,19 @@ def test_upcast_add():
   run_uops(uops, {0: out, 1: A, 2: B})
   assert out == [A[i] + B[i] for i in range(N)]
 
-def test_upcast_requires_divisible():
+def test_auto_upcast_skips_when_not_divisible():
+  scalar = fully_unroll(make_mul_uops(3, 3))                # N=9, 9 % 4 != 0 -> stays scalar
+  assert not any(u.op is Ops.STACK for u in scalar)
+  assert sum(u.op is Ops.STORE for u in scalar) == 9
   with pytest.raises(ValueError):
-    upcast_elementwise(make_mul_uops(3, 3), 4)               # N=9 not divisible by 4
+    fully_unroll(make_mul_uops(3, 3), upcast=4)             # forcing vec4 on N=9 raises
 
 def test_upcast_to_onnx_runs():
   import numpy as np
   import onnx
   import onnxruntime as ort
   from helpers.onnx_export import uops_to_onnx
-  m = uops_to_onnx(upcast_elementwise(make_mul_uops(10, 10), 4), name="mul_upcast")
+  m = uops_to_onnx(fully_unroll(make_mul_uops(10, 10)), name="mul_upcast")
   onnx.checker.check_model(m)
   ops = Counter(n.op_type for n in m.graph.node)
   # 50 vec loads x Gather(4) + 200 GEP x Gather(1) = 250 Gather; 100 Mul; 25 STACK + 1 out Concat
@@ -84,7 +87,7 @@ def test_upcast_synth_matches_scalar():
   pytest.importorskip("rknn")
   from helpers.unroll import fully_unroll
   from helpers.rknn_synth import uops_to_rknn, analyze_elementwise
-  up = upcast_elementwise(make_mul_uops(10, 10), 4)
+  up = fully_unroll(make_mul_uops(10, 10))
   assert analyze_elementwise(up) == (100, Ops.MUL)
   assert uops_to_rknn(up, 10, 10) == uops_to_rknn(fully_unroll(make_mul_uops(10, 10)), 10, 10)
 
@@ -95,7 +98,7 @@ def test_upcast_synth_runs_on_npu():
   A = (np.arange(N) % 7).astype(np.float16)
   B = (np.arange(N) % 5 + 1).astype(np.float16)
   try:
-    z = run_uops_on_npu(upcast_elementwise(make_mul_uops(10, 10), 4), [A, B], rows=10, cols=10)
+    z = run_uops_on_npu(fully_unroll(make_mul_uops(10, 10)), [A, B], rows=10, cols=10)
   except RuntimeError as e:
     pytest.skip(f"NPU runtime unavailable: {e}")
   np.testing.assert_allclose(np.asarray(z).reshape(-1)[:N], A * B)
@@ -106,7 +109,7 @@ def test_upcast_onnx_to_rknn_collapses_to_mul():
   from helpers.onnx_export import uops_to_onnx
   from helpers.rknn_export import onnx_to_rknn_bytes
   from helpers.rknn_decode import decode_rknn
-  m = uops_to_onnx(upcast_elementwise(make_mul_uops(10, 10), 4), name="mul_upcast")
+  m = uops_to_onnx(fully_unroll(make_mul_uops(10, 10)), name="mul_upcast")
   d = decode_rknn(onnx_to_rknn_bytes(m))
   # the toolkit re-fuses the verbose Gather/GEP/Mul/Concat back to a single Mul + EW tile
   assert sum(n["op"] == "Mul" for n in d["nodes"]) == 1

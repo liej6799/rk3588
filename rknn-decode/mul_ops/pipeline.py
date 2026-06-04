@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 
 from collections import Counter
 import numpy as np
-from helpers.unroll import upcast_elementwise
+from helpers.unroll import fully_unroll
 from helpers.onnx_export import uops_to_onnx
 from helpers.rknn_export import onnx_to_rknn_bytes
 from helpers.rknn_decode import decode_rknn
@@ -21,7 +21,7 @@ from mul_ops.uops import make_mul_uops
 
 def main():
   N = 100
-  up = upcast_elementwise(make_mul_uops(10, 10), 4)
+  up = fully_unroll(make_mul_uops(10, 10))            # auto-upcasts (N=100 -> vec(4))
   print(f"[1] UPCAST UOPS  ({len(up)}): {dict(Counter(u.op.name for u in up))}")
 
   model = uops_to_onnx(up, name="mul_upcast_10x10")
