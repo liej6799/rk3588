@@ -73,15 +73,17 @@ def test_matmul_onnx_runs():
   out = sess.run(None, {"input1": A, "input2": B})[0].reshape(-1)[:64].astype(np.float32)
   np.testing.assert_allclose(out, ref)
 
-def test_matmul_runs_on_npu():
+def test_matmul_on_npu_toolkit_free():
+  # matmul as element-wise mul+add NPU ops, each synthesized toolkit-free (no compiler)
   pytest.importorskip("rknn")
-  from helpers.onnx_export import uops_to_onnx
-  from helpers.rknn_export import onnx_to_rknn_bytes
-  from helpers.rknn_run import run_rknn
-  blob = onnx_to_rknn_bytes(uops_to_onnx(fully_unroll(make_matmul_uops(8)), name="matmul_8x8"))
-  A, B, ref = _matmul_io(8)
+  from matmul_ops.run import matmul_npu
+  n = 8
+  rng = np.random.default_rng(0)
+  A = rng.integers(0, 5, n*n).astype(np.float16)
+  B = rng.integers(0, 5, n*n).astype(np.float16)
+  ref = (A.reshape(n, n).astype(np.float32) @ B.reshape(n, n).astype(np.float32)).reshape(-1)
   try:
-    out = run_rknn(blob, [A, B], target="rk3588")
+    out = matmul_npu(A, B, n, n, n)
   except RuntimeError as e:
     pytest.skip(f"NPU runtime unavailable: {e}")
-  np.testing.assert_allclose(np.array(out[0]).reshape(-1)[:64].astype(np.float32), ref)
+  np.testing.assert_allclose(out.astype(np.float32), ref)

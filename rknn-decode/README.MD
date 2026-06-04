@@ -35,7 +35,7 @@ rknn-decode/
 │   └── pipeline.py     #   upcast UOps -> ONNX -> rknn -> NPU, decoded at each stage
 ├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
 │   ├── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
-│   └── run.py          #   matmul UOps -> ONNX -> RKNN -> NPU, verified vs numpy
+│   └── run.py          #   matmul on the NPU as element-wise mul+add ops, toolkit-free
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
 │   ├── run.py          #   load the uops, then fully unroll and print
@@ -309,32 +309,23 @@ kernel (`UNROLL axis=0`). For 8×8 this matches tinygrad's op counts (64 `STORE`
 scheduler-specific op order). Verified against numpy by the interpreter
 (`tests/test_matmul.py`).
 
-Since `MULACC` now lowers to ONNX (`Mul` + `Add`), the whole matmul also runs through
-**ONNX → RKNN → NPU**: the toolkit compiles the (scalar) Mul/Add graph into a large
-element-wise tile program (8×8 → ~1391 command blocks: 553 `EW_BINARY` + reshape/split/
-concat) and the NPU result equals `a @ b`:
+A single matmul `.rknn` can't be synthesized toolkit-free (no matmul/conv command-stream
+emitter — `uops_to_rknn` rejects it). But matmul **decomposes into element-wise ops we can**:
+`A @ B` is the sum of K rank-1 terms — for each k, an element-wise multiply of the broadcast
+column `A[:,k]` and row `B[k,:]`, accumulated with element-wise adds. Each multiply/add is
+synthesized from UOps via `uops_to_rknn` (no compiler) and run on the NPU — the same
+`add_ops`/`mul_ops` synth path. So `matmul_ops.run` runs the whole matmul on the NPU with
+**zero toolkit and no caching**:
 
 ```sh
-.venv/bin/python3 -m matmul_ops.run            # compile once (cached), then recreate+run
+.venv/bin/python3 -m matmul_ops.run            # 8x8 = 8 mul + 7 add toolkit-free NPU ops
+# matmul 8x8x8 = 8 mul + 7 add toolkit-free NPU ops in ~3s
+# NPU == numpy matmul: True
 ```
 
-The slow part is the **toolkit compile** (~30s for 8×8 → ~1391 tiles), not the run. So
-`matmul_ops.run` compiles **once** and caches the `.rknn`; every run after that is
-toolkit-free: it *recreates* the `.rknn` from its decoded form (`recreate_rknn`, ~0.3s,
-byte-identical) and runs it on the NPU (~0.1s). Only the first (cache-miss) call imports
-the compiler at all:
-
-```
-[compile]  toolkit (one-time)   31.72s   (first run only)
-[compile]  cache hit             0.00s   (every run after)
-[recreate] toolkit-free          0.33s
-[run]      NPU                    0.09s   (== numpy matmul)
-```
-
-This is correct but not efficient — we feed the toolkit the fully-unrolled scalar matmul,
-not an ONNX `Gemm`, so it never recognizes the matmul and emits hundreds of element-wise
-tiles. It still can't be synthesized *toolkit-free* (no matmul/conv command-stream emitter);
-`uops_to_rknn` rejects it. The compile is one-time; recreate-and-run needs no compiler. But matmul is **not** an
+(The broadcasts are host-side numpy reshapes; the arithmetic — the K multiplies and the
+accumulation — runs on the NPU via toolkit-free element-wise tiles. The MULACC/ONNX path
+still exists for reference, but the run no longer invokes the compiler.) But matmul is **not** an
 element-wise add, so `uops_to_rknn` deliberately rejects it: the NPU matmul/conv engine
 (the `CNA`/`CORE` blocks) is a separate command stream that the toolkit-free synthesizer
 does not emit. So matmul is reproducible/verifiable at the UOp level, but not yet runnable
