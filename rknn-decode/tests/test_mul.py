@@ -16,20 +16,27 @@ from helpers.rknn_synth import analyze_elementwise, uops_to_rknn, run_uops_on_np
 from helpers.rknn_decode import decode_rknn
 from mul_ops.uops import make_mul_uops
 
-def test_build_and_unroll_is_mul():
+def test_build_is_mul():
   uops = make_mul_uops(10, 10)
   assert sum(u.op is Ops.RANGE for u in uops) == 2
   st = next(u for u in uops if u.op is Ops.STORE)
   assert st.src[1].op is Ops.MUL                          # value is a multiply
-  unr = fully_unroll(uops, upcast=1)                       # scalar form
+
+def test_scalar_unroll_is_mul():
+  unr = fully_unroll(make_mul_uops(3, 3))                  # N=9 (not div 4) -> scalar
   N, op = analyze_elementwise(unr)
-  assert N == 100 and op is Ops.MUL
-  assert sum(u.op is Ops.STORE for u in unr) == 100
-  assert sum(u.op is Ops.MUL for u in unr) == 100         # one product per element
+  assert N == 9 and op is Ops.MUL
+  assert sum(u.op is Ops.STORE for u in unr) == 9
   # every store is MUL(LOAD(INDEX(a,k)), LOAD(INDEX(b,k)))
   for st in (u for u in unr if u.op is Ops.STORE):
     v = st.src[1]
     assert v.op is Ops.MUL and all(s.op is Ops.LOAD for s in v.src)
+
+def test_auto_unroll_is_vectorized_mul():
+  unr = fully_unroll(make_mul_uops(10, 10))                # N=100 -> auto vec4
+  N, op = analyze_elementwise(unr)
+  assert N == 100 and op is Ops.MUL
+  assert sum(u.op is Ops.STORE for u in unr) == 25 and sum(u.op is Ops.MUL for u in unr) == 100
 
 def test_interp_matches_mul():
   unr = fully_unroll(make_mul_uops(10, 10))

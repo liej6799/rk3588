@@ -269,7 +269,7 @@ op/dtype/src on every line — `tests/test_upcast.py`); a 5×5 (N=25) stays scal
 
 ```sh
 python3 -m mul_ops.run            # 10x10 -> auto-upcast vec(4) listing (== E_25_4)
-python3 -m mul_ops.run --scalar   # force the scalar unroll
+python3 -m mul_ops.run 3 3        # N=9 (not divisible by 4) -> scalar unroll
 ```
 
 It's a host-codegen detail: scalar and vectorized forms compute the same thing and

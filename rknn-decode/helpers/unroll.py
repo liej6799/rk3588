@@ -5,8 +5,8 @@ with each value and constant-folding the index math) and every REDUCE (op-foldin
 range). Then, mirroring tinygrad's `hand_coded_optimizations`, it AUTO-UPCASTS: if the
 result is a contiguous 2-input element-wise add/mul whose element count N is divisible by 4,
 it vectorizes 4 elements into a `half.vec(4)` (CAST/vec-LOAD/GEP/op/STACK/vec-STORE) -- the
-same `OptOps.UPCAST axis arg=4` tinygrad applies. Otherwise it returns the scalar unroll.
-Pass `upcast=1` to force the scalar form, or `upcast=n` to force a specific width.
+same `OptOps.UPCAST axis arg=4` tinygrad applies. Otherwise (N not divisible by 4, or a
+reduction like matmul) the scalar unroll is returned.
 """
 import itertools
 from .uop import Ops, UOp, AxisType, dtypes
@@ -115,24 +115,14 @@ def _vectorize(flat: list[UOp], vec: int, layout) -> list[UOp]:
   return out_list + [UOp(Ops.SINK, dtypes.void, tuple(store_uops), ki)]
 
 
-def fully_unroll(uops: list[UOp], upcast="auto") -> list[UOp]:
+def fully_unroll(uops: list[UOp]) -> list[UOp]:
   """Fully unroll `uops`, auto-vectorizing element-wise kernels (UPCAST) like tinygrad.
 
-  upcast="auto" (default): vectorize by 4 if the unrolled graph is a contiguous element-wise
-                           add/mul with N % 4 == 0, else return the scalar unroll.
-  upcast=1 / None        : always return the scalar unroll.
-  upcast=n (int > 1)     : force vec(n); raises if the graph isn't vectorizable or N % n != 0.
+  Vectorizes by 4 if the unrolled graph is a contiguous element-wise add/mul with
+  N % 4 == 0; otherwise returns the scalar unroll.
   """
   flat = _scalar_unroll(uops)
-  if upcast in (1, None):
-    return flat
   layout = _elementwise_layout(flat)
-  if upcast == "auto":
-    return _vectorize(flat, AUTO_UPCAST, layout) if (layout and layout[0] % AUTO_UPCAST == 0) else flat
-  if not isinstance(upcast, int) or upcast < 1:
-    raise ValueError(f"upcast must be 'auto', 1/None, or an int >= 1 (got {upcast!r})")
-  if layout is None:
-    raise ValueError("graph is not a contiguous element-wise add/mul; cannot upcast")
-  if layout[0] % upcast != 0:
-    raise ValueError(f"element count N={layout[0]} is not divisible by vec={upcast}")
-  return _vectorize(flat, upcast, layout)
+  if layout and layout[0] % AUTO_UPCAST == 0:
+    return _vectorize(flat, AUTO_UPCAST, layout)
+  return flat

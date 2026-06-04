@@ -23,16 +23,17 @@ def test_build_structure():
   val = st.src[1]
   assert val.op is Ops.ADD and [s.op for s in val.src] == [Ops.LOAD, Ops.LOAD]
 
-def test_unroll_to_100():
-  unr = fully_unroll(make_add2d_uops(10, 10), upcast=1)   # scalar form: verify loop expansion
+def test_scalar_2d_index_fold():
+  unr = fully_unroll(make_add2d_uops(3, 3))               # N=9 (not div 4) -> scalar unroll
   assert sum(u.op is Ops.RANGE for u in unr) == 0
-  assert sum(u.op is Ops.STORE for u in unr) == 100      # 10*10 iterations
-  assert analyze_add(unr) == 100
-  # the computed index i*10 + j folds to constants covering 0..99 exactly once
-  assert sorted(u.arg for u in unr if u.op is Ops.CONST) == list(range(100))
+  assert sum(u.op is Ops.STORE for u in unr) == 9         # 3*3 iterations, no vectorization
+  assert not any(u.op is Ops.STACK for u in unr)
+  assert analyze_add(unr) == 9
+  # the computed index i*3 + j folds to constants covering 0..8 exactly once
+  assert sorted(u.arg for u in unr if u.op is Ops.CONST) == list(range(9))
 
 def test_auto_upcast_vectorizes():
-  unr = fully_unroll(make_add2d_uops(10, 10))             # default auto-upcast (N=100 -> vec4)
+  unr = fully_unroll(make_add2d_uops(10, 10))             # auto-upcast (N=100 -> vec4)
   assert sum(u.op is Ops.STORE for u in unr) == 25 and any(u.op is Ops.STACK for u in unr)
   assert analyze_add(unr) == 100                          # still recognized as a 100-elem add
 

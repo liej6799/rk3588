@@ -62,8 +62,6 @@ def test_auto_upcast_skips_when_not_divisible():
   scalar = fully_unroll(make_mul_uops(3, 3))                # N=9, 9 % 4 != 0 -> stays scalar
   assert not any(u.op is Ops.STACK for u in scalar)
   assert sum(u.op is Ops.STORE for u in scalar) == 9
-  with pytest.raises(ValueError):
-    fully_unroll(make_mul_uops(3, 3), upcast=4)             # forcing vec4 on N=9 raises
 
 def test_upcast_to_onnx_runs():
   import numpy as np
