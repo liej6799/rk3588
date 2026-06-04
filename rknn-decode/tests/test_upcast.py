@@ -78,6 +78,28 @@ def test_upcast_to_onnx_runs():
   out = sess.run(None, {"input1": A, "input2": B})[0].reshape(-1)[:100].astype(np.float32)
   np.testing.assert_allclose(out, A.astype(np.float32) * B.astype(np.float32))
 
+def test_upcast_synth_matches_scalar():
+  # the toolkit-free synth accepts the upcasted UOps directly and produces the SAME .rknn
+  # as the scalar unroll (it recovers N and the op; the NPU command is one tiled mul)
+  pytest.importorskip("rknn")
+  from helpers.unroll import fully_unroll
+  from helpers.rknn_synth import uops_to_rknn, analyze_elementwise
+  up = upcast_elementwise(make_mul_uops(10, 10), 4)
+  assert analyze_elementwise(up) == (100, Ops.MUL)
+  assert uops_to_rknn(up, 10, 10) == uops_to_rknn(fully_unroll(make_mul_uops(10, 10)), 10, 10)
+
+def test_upcast_synth_runs_on_npu():
+  import numpy as np
+  from helpers.rknn_synth import run_uops_on_npu
+  N = 100
+  A = (np.arange(N) % 7).astype(np.float16)
+  B = (np.arange(N) % 5 + 1).astype(np.float16)
+  try:
+    z = run_uops_on_npu(upcast_elementwise(make_mul_uops(10, 10), 4), [A, B], rows=10, cols=10)
+  except RuntimeError as e:
+    pytest.skip(f"NPU runtime unavailable: {e}")
+  np.testing.assert_allclose(np.asarray(z).reshape(-1)[:N], A * B)
+
 def test_upcast_onnx_to_rknn_collapses_to_mul():
   pytest.importorskip("rknn")
   import numpy as np

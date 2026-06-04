@@ -290,6 +290,12 @@ Concat). Compiling that with the toolkit **re-fuses it back to a single `Mul`** 
 So whether the multiply enters as scalar UOps, vectorized UOps, or a verbose ONNX, it ends
 up as the same single element-wise tile on the NPU.
 
+`uops_to_rknn` accepts the **upcasted UOps directly** too (toolkit-free): `analyze_elementwise`
+recovers `(N, op)` from either the scalar or the vectorized graph (peeling `CAST`/`GEP`/`STACK`),
+so synthesizing from the upcast form yields a `.rknn` **byte-identical** to the scalar one
+(same SHA-256) — verified on the NPU. The vectorization is host-side bookkeeping; the NPU
+command is one tiled op regardless of how the UOps are shaped.
+
 **Reductions / matmul (`matmul_ops`).** The UOp layer also handles `Ops.REDUCE`: a matmul
 `out[i,j] = Σ_k a[i,k]·b[k,j]` (three loops, one of them a `REDUCE`) builds, and
 `fully_unroll` expands the contraction into an explicit sum-of-products — verified against

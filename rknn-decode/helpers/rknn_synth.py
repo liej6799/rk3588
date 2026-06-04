@@ -29,46 +29,65 @@ _EW_CFG = {Ops.ADD: 0x108202C0, Ops.MUL: 0x108003C4}
 _EW_CFG_REG = ("DPU", 0x4070)
 
 
+def _peel_index(u):
+  """(CAST of) INDEX(PARAM, CONST) -> (param_arg, offset). CAST = the upcast vec-ptr cast."""
+  if u.op is Ops.CAST:
+    u = u.src[0]
+  if u.op is not Ops.INDEX or u.src[0].op is not Ops.PARAM or u.src[1].op is not Ops.CONST:
+    raise ValueError("expected (CAST of) INDEX(PARAM, CONST)")
+  return u.src[0].arg, u.src[1].arg
+
+
+def _operand_param(u):
+  """ALU operand -> input PARAM arg. Scalar: LOAD(INDEX(p)). Vectorized: GEP(LOAD(CAST(INDEX(p))))."""
+  if u.op is Ops.GEP:
+    u = u.src[0]
+  if u.op is not Ops.LOAD:
+    raise ValueError(
+      "operand must be LOAD(INDEX(PARAM)) (scalar) or GEP(LOAD(...)) (vectorized); a "
+      "reduction (e.g. matmul: sum of products) is not a simple element-wise op")
+  return _peel_index(u.src[0])[0]
+
+
 def analyze_elementwise(uops):
   """Validate a fully-unrolled 2-input element-wise op and return (N, op).
 
-  Every STORE must be `STORE(INDEX(out,k), OP(LOAD(INDEX(a,k)), LOAD(INDEX(b,k))))` where
-  OP is the same ADD or MUL across all stores, with one output PARAM and two input PARAMs.
-  Raises ValueError otherwise (e.g. for MUL/REDUCE trees like matmul).
+  Accepts both the scalar full-unroll
+    `STORE(INDEX(out,k), OP(LOAD(INDEX(a,k)), LOAD(INDEX(b,k))))`
+  and the vectorized UPCAST form
+    `STORE(CAST(INDEX(out,k)), STACK(OP(GEP(LOAD(CAST(INDEX(a)))), GEP(LOAD(...))), ...))`.
+  OP must be the same ADD or MUL across all stores, with one output and two input PARAMs.
+  Raises ValueError otherwise (e.g. for REDUCE trees like matmul).
   """
   if any(u.op is Ops.RANGE for u in uops):
     raise ValueError("expected a fully-unrolled (range-free) graph; call fully_unroll first")
   stores = [u for u in uops if u.op is Ops.STORE]
   if not stores:
     raise ValueError("no STORE in uops")
-  out_params, in_params, ops, out_offsets = set(), set(), set(), []
+  out_params, in_params, ops, pieces = set(), set(), set(), []
   for st in stores:
-    idx, val = st.src
-    if idx.op is not Ops.INDEX or idx.src[0].op is not Ops.PARAM or idx.src[1].op is not Ops.CONST:
-      raise ValueError("STORE target must be INDEX(PARAM, CONST)")
-    out_params.add(idx.src[0].arg)
-    out_offsets.append(idx.src[1].arg)
-    if val.op not in (Ops.ADD, Ops.MUL) or len(val.src) != 2:
+    out_param, off = _peel_index(st.src[0])
+    out_params.add(out_param)
+    val = st.src[1]
+    pieces.append((off, val.dtype.count))               # vec store covers `count` offsets
+    alu = val.src[0] if val.op is Ops.STACK else val     # peel STACK -> one lane's op
+    if alu.op not in (Ops.ADD, Ops.MUL) or len(alu.src) != 2:
       raise ValueError("only a 2-operand element-wise ADD or MUL (z = a+b / a*b) is supported")
-    ops.add(val.op)
-    for ld in val.src:
-      if ld.op is not Ops.LOAD or ld.src[0].op is not Ops.INDEX or ld.src[0].src[0].op is not Ops.PARAM:
-        raise ValueError(
-          "not a simple element-wise op: each operand must be LOAD(INDEX(PARAM, CONST)). "
-          "Kernels with a reduction (e.g. matmul: sum of products) are not supported by "
-          "the toolkit-free synthesizer (the NPU matmul/conv engine is a separate, "
-          "un-ported command stream).")
-      in_params.add(ld.src[0].src[0].arg)
+    ops.add(alu.op)
+    for operand in alu.src:
+      in_params.add(_operand_param(operand))
   if len(ops) != 1:
     raise ValueError(f"all stores must use the same op, got {sorted(o.name for o in ops)}")
   if len(out_params) != 1:
     raise ValueError(f"expected exactly one output PARAM, got {sorted(out_params)}")
   if len(in_params) != 2:
     raise ValueError(f"expected exactly two input PARAMs, got {sorted(in_params)}")
-  N = len(stores)
-  if sorted(out_offsets) != list(range(N)):
-    raise ValueError("STOREs must cover output offsets 0..N-1 exactly once")
-  return N, next(iter(ops))
+  pos = 0
+  for off, count in sorted(pieces):
+    if off != pos:
+      raise ValueError("STOREs must tile output offsets contiguously from 0")
+    pos += count
+  return pos, next(iter(ops))
 
 
 def analyze_add(uops) -> int:
