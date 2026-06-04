@@ -6,16 +6,33 @@ broadcast column A[:,k] times row B[k,:], accumulated. Each step is ONE fused mu
 accumulate (MULACC) .rknn -- a mixed Mul+Add op-chain `col*row + acc` -- synthesized
 toolkit-free (no compiler) and run on the NPU. So an n x n matmul = K MULACC NPU ops.
 
-    .venv/bin/python3 -m matmul_ops.run            # 8x8
+    .venv/bin/python3 -m matmul_ops.run            # 8x8 (prints the unrolled MULACC UOp summary)
     .venv/bin/python3 -m matmul_ops.run 16         # n x n
+    .venv/bin/python3 -m matmul_ops.run --uops     # also dump the full unrolled UOp list
     .venv/bin/python3 -m matmul_ops.run --perf     # also print the NPU command queue (eval_perf)
 """
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # make project root importable
 
 import numpy as np
+from collections import Counter
+from helpers.unroll import fully_unroll
 from helpers.rknn_synth import chain_to_rknn
 from helpers.rknn_run import RknnSession
+from matmul_ops.uops import make_matmul_uops
+
+def dump_uops(n, full=False):
+  """Print the matmul's original + unrolled UOps (the MULACC reduce). The NPU run uses the
+  equivalent element-wise MULACC decomposition, not these UOps directly (a dot-product
+  reduce can't be one toolkit-free .rknn)."""
+  orig = make_matmul_uops(n)
+  unr = fully_unroll(orig)
+  print(f"[uops] original {len(orig)} -> unrolled {len(unr)}: "
+        f"{dict(Counter(u.op.name for u in unr))}")
+  if full:
+    for i, u in enumerate(unr):
+      print(f"  {i:3d}: {u.op.name:7s} {str(u.dtype):14s} src={[unr.index(s) for s in u.src]}"
+            + (f" arg={u.arg}" if u.arg is not None and u.op.name != 'SINK' else ""))
 
 def matmul_npu(A, B, M, K, N, perf=False):
   """out[i,j] = sum_k A[i,k]*B[k,j] (A: M*K, B: K*N, flat fp16), via K fused multiply-
@@ -41,6 +58,7 @@ def main():
   args = [a for a in sys.argv[1:] if not a.startswith("--")]
   perf = "--perf" in sys.argv[1:]
   n = int(args[0]) if args else 8
+  dump_uops(n, full="--uops" in sys.argv[1:])               # show the unrolled MULACC UOps
   rng = np.random.default_rng(0)
   A = rng.integers(0, 5, n*n).astype(np.float16)            # small ints stay fp16-exact
   B = rng.integers(0, 5, n*n).astype(np.float16)
