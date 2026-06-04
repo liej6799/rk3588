@@ -24,7 +24,8 @@ class RknnSession:
       with RknnSession(blob) as sess:
         for ...: out = sess.run([a, b, acc])
   """
-  def __init__(self, model, target: str = "rk3588", core_mask: int = 0, verbose: bool = False):
+  def __init__(self, model, target: str = "rk3588", core_mask: int = 0,
+               perf_debug: bool = False, verbose: bool = False):
     from rknn.api import RKNN
     self._work = None
     if isinstance(model, (bytes, bytearray)):
@@ -36,7 +37,7 @@ class RknnSession:
     try:
       if self._rknn.load_rknn(model) != 0:
         raise RuntimeError(f"rknn.load_rknn failed for {model}")
-      if self._rknn.init_runtime(target=target, core_mask=core_mask) != 0:
+      if self._rknn.init_runtime(target=target, core_mask=core_mask, perf_debug=perf_debug) != 0:
         raise RuntimeError(f"rknn.init_runtime failed (target={target}); is the NPU runtime available?")
     except BaseException:
       self.close()                                         # don't leak the runtime / tmpfs dir
@@ -44,6 +45,11 @@ class RknnSession:
 
   def run(self, inputs) -> list:
     return self._rknn.inference(inputs=list(inputs))
+
+  def eval_perf(self):
+    """Print the runtime's per-layer command/perf table for the last run (needs
+    perf_debug=True at construction). This is the NPU command queue as executed."""
+    return self._rknn.eval_perf()
 
   def close(self):
     if self._rknn is not None:
