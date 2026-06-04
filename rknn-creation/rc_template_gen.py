@@ -16,12 +16,21 @@ import struct
 
 _DPU, _RDMA, _PC = 0x1001, 0x2001, 0x0101
 
+EW_OP_ADD = 0
+EW_OP_MUL = 1
+_EW_CFG = {EW_OP_ADD: 0x108202c0, EW_OP_MUL: 0x108003c4}
+
+
+def _ew_cfg(op):
+    return _EW_CFG.get(op, _EW_CFG[EW_OP_ADD])
+
 
 def _w(tgt, reg, val):
     return (tgt << 48) | ((val & 0xFFFFFFFF) << 16) | reg
 
 
-CANON = [
+def _canon(op=EW_OP_ADD):
+    return [
     (0x1001, 0x4004, 0x0000000e, False),
     (0x2001, 0x5004, 0x0000000e, False),
     (0x1001, 0x400c, 0x000001e5, False),
@@ -45,7 +54,7 @@ CANON = [
     (0x1001, 0x4064, 0x00000000, False),
     (0x1001, 0x4068, 0x00000000, False),
     (0x1001, 0x406c, 0x00000000, False),
-    (0x1001, 0x4070, 0x108202c0, False),
+    (0x1001, 0x4070, _ew_cfg(op), False),
     (0x1001, 0x4074, 0x00000000, False),
     (0x1001, 0x4078, 0x00000001, False),
     (0x1001, 0x407c, 0x00000000, False),
@@ -209,13 +218,13 @@ def _build_trailing(n):
     return w
 
 
-def _canon_words():
-    return [_w(t, r, 0 if p else v) for (t, r, v, p) in CANON]
+def _canon_words(op=EW_OP_ADD):
+    return [_w(t, r, 0 if p else v) for (t, r, v, p) in _canon(op)]
 
 
-def build_template(n_inputs):
+def build_template(n_inputs, op=EW_OP_ADD):
     n_adds = n_inputs - 1
-    canon = _canon_words()
+    canon = _canon_words(op)
     words = list(PREFIX[n_inputs])
     gbi = 0
     for _tile in range(6):
@@ -230,6 +239,6 @@ def build_template(n_inputs):
     return b"\x00" * OFF[n_inputs] + struct.pack(f"<{len(words)}Q", *words)
 
 
-def all_templates(max_n=None):
+def all_templates(max_n=None, op=EW_OP_ADD):
     upper = (max_n or 7) + 1
-    return {n: build_template(n) for n in range(2, upper + 1)}
+    return {n: build_template(n, op) for n in range(2, upper + 1)}

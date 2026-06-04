@@ -34,7 +34,7 @@ _RDMA = 0x2001
 _TARGETS = {0x0101, 0x0201, 0x0801, _DPU, _RDMA, 0x4001,
             0x8001, 0x10001, 0x20001, 0x40001}
 
- = rc_template_gen.all_templates()
+_RC_TEMPLATES = rc_template_gen.all_templates()
 for _n_ext in (5, 6, 7):
     _p = Path(__file__).resolve().parent / f"_rc_add{_n_ext}.bin"
     if _p.exists():
@@ -325,8 +325,8 @@ def _patch_tiles(body, N, n_inputs):
         struct.pack_into("<Q", body, idx * 8, val)
 
 
-def build_body(N, n_inputs, rows=None, cols=None):
-    return _build_body_scratch_flatbuffers(N, n_inputs)
+def build_body(N, n_inputs, rows=None, cols=None, ops=None):
+    return _build_body_scratch_flatbuffers(N, n_inputs, ops)
 
 
 def surface_split(N):
@@ -542,11 +542,12 @@ def _rc_set(w, b, c, t, reg, val):
             return
 
 
-def _rc_patch_block(w, i, c, W, ch, base, st):
+def _rc_patch_block(w, i, c, W, ch, base, st, op="Add"):
     for reg in (0x4030, 0x405c):
         _rc_set(w, i, c, _DPU, reg, W - 1)
     _rc_set(w, i, c, _RDMA, 0x500c, W - 1)
-    _rc_set(w, i, c, _DPU, 0x403c, (ch << 16) | ch)
+    ch_val = ((W - 1) << 16 | ch) if op == "Mul" else (ch << 16 | ch)
+    _rc_set(w, i, c, _DPU, 0x403c, ch_val)
     _rc_set(w, i, c, _DPU, 0x4058, ch)
     _rc_set(w, i, c, _RDMA, 0x5014, ch)
     _rc_set(w, i, c, _DPU, 0x4034, 0)
@@ -635,7 +636,7 @@ def _build_tensors(b, n_inputs, ins, outp, n_adds, plan, idx,
     return toffs
 
 
-def _build_nodes(b, n_inputs, ins, outp, n_adds, idx):
+def _build_nodes(b, n_inputs, ins, outp, n_adds, idx, ops=None):
     noffs = []
 
     for nm in ins:
@@ -657,7 +658,8 @@ def _build_nodes(b, n_inputs, ins, outp, n_adds, idx):
             rs_out = f"{outp}_rs"
         else:
             rs_out = "t-rs" if n_inputs == 3 else f"t{k + 1}-rs"
-        noffs.append(_add_node(b, k + 1, idx[rs_a], idx[rs_b], idx[rs_out]))
+        op_name = (ops[k] if ops and k < len(ops) else None) or "Add"
+        noffs.append(_add_node(b, k + 1, idx[rs_a], idx[rs_b], idx[rs_out], op_name))
 
         next_input = k + 2
         if next_input < n_inputs:
@@ -716,7 +718,7 @@ def _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp):
     b.PrependUOffsetTRelative(sg)
     return b.EndVector()
 
-def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs):
+def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
     ins, outp = _io(n_inputs)
     s_target = _str(b, "RKNPU v2")
     s_toolkit = _str(b, "2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16))")
@@ -760,7 +762,7 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs):
 
     b.Finish(root, b"RKNN")
     fb = bytearray(b.Output())
-    rc_raw = _RC_TEMPLATES[n_inputs]
+    rc_raw = rc_template_gen.build_template(n_inputs)
     taskdesc = _taskdesc(n_inputs)
 
     full = fb + rc_raw + taskdesc
@@ -787,7 +789,7 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs):
         full[fb_len:fb_len] = b"\x00" * pad
         fb_len += pad
 
-    _patch_regcmd(full, fb_len, n_adds, C1, W, tiles)
+    _patch_regcmd(full, fb_len, n_adds, C1, W, tiles, ops)
 
     rc_target = _rc_target_offset(rc_raw, n_inputs)
     root_rt = struct.unpack_from("<I", full, 0)[0]
@@ -853,7 +855,7 @@ def _taskdesc(n_inputs):
     return struct.pack(f"<{len(words)}Q", *words)
 
 
-def _patch_regcmd(full, rc_offset, n_adds, C1, W, tiles):
+def _patch_regcmd(full, rc_offset, n_adds, C1, W, tiles, ops=None):
     n = len(full) // 8
     spans, w = _regcmd_spans(bytes(full))
     n_tiles = len(tiles)
@@ -862,12 +864,17 @@ def _patch_regcmd(full, rc_offset, n_adds, C1, W, tiles):
 
     for g in range(n_adds):
         group = spans[g * spans_per_add : (g + 1) * spans_per_add]
+        op_name = (ops[g] if ops and g < len(ops) else None) or "Add"
+        ew_cfg_val = rc_template_gen._ew_cfg(
+            rc_template_gen.EW_OP_MUL if op_name == "Mul" else rc_template_gen.EW_OP_ADD
+        )
         for tile_idx, (i, c) in enumerate(group):
             tidx = min(tile_idx, n_tiles - 1)
             C1_tile, surf_offset = tiles[tidx]
             ch = C1_tile * 8 - 1
             base = surf_offset * st
-            _rc_patch_block(w, i, c, W, ch, base, st)
+            _rc_patch_block(w, i, c, W, ch, base, st, op_name)
+            _rc_set(w, i, c, _DPU, 0x4070, ew_cfg_val)
 
     for idx, val in enumerate(w):
         struct.pack_into("<Q", full, idx * 8, val)
@@ -1025,9 +1032,9 @@ def _reshape_node(b, rs_name, src_name, input_indices, output_indices):
     return b.EndObject()
 
 
-def _add_node(b, add_num, in_a_idx, in_b_idx, out_idx):
-    op_s = _str(b, "Add")
-    nm_s = _str(b, f"Add:add{add_num}")
+def _add_node(b, add_num, in_a_idx, in_b_idx, out_idx, op="Add"):
+    op_s = _str(b, op)
+    nm_s = _str(b, f"{op}:{op.lower()}{add_num}")
     f4 = _vec(b, [in_a_idx, in_b_idx])
     f5 = _vec(b, [out_idx])
     f9 = _ev(b)
@@ -1161,7 +1168,7 @@ def build_body_scratch(N, n_inputs):
     return bytes(body)
 
 
-def _build_body_scratch_flatbuffers(N, n_inputs):
+def _build_body_scratch_flatbuffers(N, n_inputs, ops=None):
     if n_inputs not in _RC_TEMPLATES:
         raise NotImplementedError(
             f"pure FlatBuffers generation not available for {n_inputs} inputs; "
@@ -1184,9 +1191,9 @@ def _build_body_scratch_flatbuffers(N, n_inputs):
 
     b = flatbuffers.Builder(65536)
 
-    noffs = _build_nodes(b, n_inputs, ins, outp, n_adds, idx)
+    noffs = _build_nodes(b, n_inputs, ins, outp, n_adds, idx, ops)
     toffs = _build_tensors(b, n_inputs, ins, outp, n_adds, plan, idx,
                            s2, s4, s5, N, Npad, ext, work, C1, W)
     sg = _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp)
-    fb_bytes, rc_bytes = _build_root(b, sg, n_adds, C1, W, tiles, N, n_inputs)
+    fb_bytes, rc_bytes = _build_root(b, sg, n_adds, C1, W, tiles, N, n_inputs, ops)
     return fb_bytes + rc_bytes

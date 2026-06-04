@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rknn_add_gen.py - self-contained generator for fp16 element-wise Add .rknn models.
+"""rknn_add_gen.py - self-contained generator for fp16 element-wise Add/Mul .rknn models.
 
 Generates a runnable .rknn for ANY shape (rows x cols, N=rows*cols <= 50,231,944)
 WITHOUT the rknn-toolkit2 compiler or any external template files, by embedding the
@@ -26,11 +26,14 @@ Usage
   rknn_add_gen.py --inputs 3 --rows 4096 --cols 4096 -o big3.rknn --verify
   # 4-input: e = a + b + c + d
   rknn_add_gen.py --inputs 4 --rows 4096 --cols 4096 -o big4.rknn --verify
+  # element-wise Mul: z = x * y
+  rknn_add_gen.py --op Mul --rows 10 --cols 10 -o mul.rknn --verify
 """
 import argparse, json, math, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_rknn_build_queue import FB
+import rc_template_gen
 
 ROOT = Path(__file__).resolve().parent
 HEADER_SIZE = 0x40
@@ -51,7 +54,7 @@ TEMPLATES = {
 }
 
 
-def _get_body(n_inputs):
+def _get_body(n_inputs, ops=None):
     raw_body = ROOT / f"_body_add{n_inputs}_10x10.body"
     if raw_body.exists():
         return bytearray(raw_body.read_bytes())
@@ -63,7 +66,7 @@ def _get_body(n_inputs):
         _EMBEDDED.update(_emb)
     if n_inputs in _EMBEDDED:
         return bytearray(_EMBEDDED[n_inputs])
-    template = make_template(n_inputs)
+    template = make_template(n_inputs, ops=ops)
     body, _ = split(Path(template).read_bytes())
     return body
 VERIFY_BINS = {
@@ -153,11 +156,20 @@ def _set(w, b, c, t, reg, val):
             w[b+k] = (r & ~(0xFFFFFFFF << 16)) | ((val & 0xFFFFFFFF) << 16); return
 
 
-def _patch_block(w, i, c, W, ch, base, st):
+def _get_reg(w, b, c, t, reg):
+    for k in range(c):
+        r = w[b+k]
+        if ((r >> 48) & 0xFFFF) == t and (r & 0xFFFF) == reg:
+            return (r >> 16) & 0xFFFFFFFF
+    return None
+
+
+def _patch_block(w, i, c, W, ch, base, st, op="Add"):
     for reg in (0x4030, 0x405c):
         _set(w, i, c, DPU, reg, W - 1)
     _set(w, i, c, RDMA, 0x500c, W - 1)
-    _set(w, i, c, DPU, 0x403c, (ch << 16) | ch)
+    ch_val = ((W - 1) << 16 | ch) if op == "Mul" else (ch << 16 | ch)
+    _set(w, i, c, DPU, 0x403c, ch_val)
     _set(w, i, c, DPU, 0x4058, ch)
     _set(w, i, c, RDMA, 0x5014, ch)
     _set(w, i, c, DPU, 0x4034, 0)
@@ -170,6 +182,34 @@ def _patch_block(w, i, c, W, ch, base, st):
     _set(w, i, c, RDMA, 0x5040, st)
     _set(w, i, c, RDMA, 0x504c, 0)
     _set(w, i, c, RDMA, 0x506c, 0)
+
+
+def _patch_ew_ops(body, ops):
+    n_adds = len(ops)
+    if all(o == "Add" for o in ops):
+        return
+    total_groups = ADD_GROUPS.get(n_adds + 1, n_adds)
+    if total_groups == 0:
+        total_groups = n_adds
+    spans, w = regcmd_spans(body)
+    spans_per_group = len(spans) // total_groups if total_groups > 0 else len(spans)
+    for g in range(n_adds):
+        op = ops[g]
+        ew_cfg_val = rc_template_gen._ew_cfg(
+            rc_template_gen.EW_OP_MUL if op == "Mul" else rc_template_gen.EW_OP_ADD
+        )
+        group = spans[g * spans_per_group : (g + 1) * spans_per_group]
+        for start, count in group:
+            _set(w, start, count, DPU, 0x4070, ew_cfg_val)
+            if op == "Mul":
+                ch_val = _get_reg(w, start, count, DPU, 0x403c)
+                if ch_val is not None:
+                    ch_lower = ch_val & 0xFFFF
+                    w_val = _get_reg(w, start, count, DPU, 0x4030)
+                    w_minus_1 = w_val if w_val is not None else ch_lower
+                    _set(w, start, count, DPU, 0x403c, (w_minus_1 << 16) | ch_lower)
+    for idx, val in enumerate(w):
+        struct.pack_into("<Q", body, idx * 8, val)
 
 
 MEMORY_PLANS = {
@@ -245,12 +285,14 @@ def plan_memory(body, N, n_inputs):
 ADD_GROUPS = {2: 1, 3: 2, 4: 3}
 
 
-def make_tiles(body, N, n_inputs):
+def make_tiles(body, N, n_inputs, ops=None):
     C1, W = surface_split(N)
     tiles = tile_split(C1)
     n_tiles = len(tiles)
     spans, w = regcmd_spans(body)
     n_adds = ADD_GROUPS.get(n_inputs, n_inputs - 1)
+    if ops is None:
+        ops = ["Add"] * n_adds
     spans_per_add = len(spans) // n_adds
     st = W * 16
     if n_tiles > spans_per_add:
@@ -258,12 +300,13 @@ def make_tiles(body, N, n_inputs):
                          f"(max N = {MAX_N:,}; use --allow-toolkit for larger models)")
     for g in range(n_adds):
         group = spans[g * spans_per_add : (g + 1) * spans_per_add]
+        op = ops[g] if g < len(ops) else "Add"
         for tile_idx, (i, c) in enumerate(group):
             tidx = min(tile_idx, n_tiles - 1)
             C1_tile, surf_offset = tiles[tidx]
             ch = C1_tile * 8 - 1
             base = surf_offset * st
-            _patch_block(w, i, c, W, ch, base, st)
+            _patch_block(w, i, c, W, ch, base, st, op)
     for idx, val in enumerate(w):
         struct.pack_into("<Q", body, idx * 8, val)
     return body, len(spans), C1, W, n_tiles
@@ -313,19 +356,25 @@ def input_output_names(n_inputs):
     return list(letters[:n_inputs]), letters[n_inputs]
 
 
-def template_path(n_inputs):
+def template_path(n_inputs, ops=None):
+    if ops and any(o != "Add" for o in ops):
+        op_suffix = "_" + "_".join(o.lower() for o in ops)
+        return ROOT / f"ew{n_inputs}{op_suffix}_10x10.rknn"
     return ROOT / TEMPLATES.get(n_inputs, f"add{n_inputs}_10x10.rknn")
 
 
-def make_template(n_inputs, shape=(10, 10)):
-    """Create the n_inputs-input chained-Add template .rknn from the program itself.
+def make_template(n_inputs, shape=(10, 10), ops=None):
+    """Create the n_inputs-input chained-EW template .rknn from the program itself.
 
-    Builds out = in0 + in1 + ... + in(n-1) as an ONNX graph of (n_inputs-1) Add nodes
-    and compiles it with the on-device toolkit (a ONE-TIME bootstrap; the result is
-    cached and then patched TOOLKIT-FREE by generate() for every real model). This
-    replaces the per-input hand-run onnx_fp16_addN scripts -- any n_inputs works.
+    Builds out = in0 op1 in1 op2 ... opN inN as an ONNX graph of (n_inputs-1)
+    EW nodes (Add or Mul per ops list) and compiles it with the on-device toolkit
+    (a ONE-TIME bootstrap; the result is cached and then patched TOOLKIT-FREE by
+    generate() for every real model).
     """
-    path = template_path(n_inputs)
+    n_adds = n_inputs - 1
+    if ops is None:
+        ops = ["Add"] * n_adds
+    path = template_path(n_inputs, ops)
     if path.exists():
         return path
     import onnx
@@ -335,9 +384,6 @@ def make_template(n_inputs, shape=(10, 10)):
     ins, outp = input_output_names(n_inputs)
     vis = [helper.make_tensor_value_info(nm, TensorProto.FLOAT16, shp) for nm in ins]
     vout = helper.make_tensor_value_info(outp, TensorProto.FLOAT16, shp)
-    # intermediate naming matches the original templates: 1 intermediate -> "t",
-    # multiple -> "t1","t2",... (so a recreated template keeps the same tensor names
-    # that MEMORY_PLANS keys on).
     n_inter = n_inputs - 2
     nodes, acc = [], ins[0]
     for i in range(1, n_inputs):
@@ -347,12 +393,15 @@ def make_template(n_inputs, shape=(10, 10)):
             res = "t"
         else:
             res = f"t{i}"
-        nodes.append(helper.make_node("Add", [acc, ins[i]], [res], name=f"add{i}"))
+        op_name = ops[i - 1]
+        nodes.append(helper.make_node(op_name, [acc, ins[i]], [res],
+                                      name=f"{op_name.lower()}{i}"))
         acc = res
-    g = helper.make_graph(nodes, f"add{n_inputs}", vis, [vout])
+    g_name = "ew" + "".join(o[0].lower() for o in ops) + str(n_inputs)
+    g = helper.make_graph(nodes, g_name, vis, [vout])
     m = helper.make_model(g, producer_name="rknn_add_gen",
                           opset_imports=[helper.make_opsetid("", 13)])
-    onnx_path = str(ROOT / f"_tmpl_add{n_inputs}_{shp[0]}x{shp[1]}.onnx")
+    onnx_path = str(ROOT / f"_tmpl_ew{n_inputs}_{shp[0]}x{shp[1]}.onnx")
     onnx.save(m, onnx_path)
     rk = RKNN(verbose=False)
     try:
@@ -366,17 +415,24 @@ def make_template(n_inputs, shape=(10, 10)):
     return path
 
 
-def generate(rows, cols, out, n_inputs, emit_parts=False):
+def generate(rows, cols, out, n_inputs, emit_parts=False, ops=None):
     N = rows * cols
     if not (1 <= N <= MAX_N):
         raise SystemExit(f"N={N} out of range 1..{MAX_N} (max {MAX_SURF} surfaces x {SURF_W})")
-    body = _get_body(n_inputs)
+    n_adds = n_inputs - 1
+    if ops is None:
+        ops = ["Add"] * n_adds
+    if len(ops) != n_adds:
+        raise SystemExit(f"expected {n_adds} ops for {n_inputs} inputs, got {len(ops)}")
+    body = _get_body(n_inputs, ops=ops)
+    _patch_ew_ops(body, ops)
     plan_memory(body, N, n_inputs)
-    body, nblk, C1, W, ntiles = make_tiles(body, N, n_inputs)
+    body, nblk, C1, W, ntiles = make_tiles(body, N, n_inputs, ops)
     trailer = make_trailer(rows, cols, n_inputs)
     Path(out).write_bytes(assemble(body, trailer))
     tile_info = f", {ntiles} tiles" if ntiles > 1 else ""
-    print(f"generated {out}: {rows}x{cols} N={N} ({n_inputs}-input, C1={C1} x W={W}, "
+    op_desc = "+".join(ops)
+    print(f"generated {out}: {rows}x{cols} N={N} ({n_inputs}-input {op_desc}, C1={C1} x W={W}, "
           f"{nblk} blocks{tile_info}, toolkit-free)")
     if emit_parts:
         Path(out + ".fb").write_bytes(body)
@@ -400,52 +456,45 @@ def verify(out, n_inputs):
     return "PASS" in r.stdout
 
 
-def generate_via_toolkit(rows, cols, out, n_inputs):
+def generate_via_toolkit(rows, cols, out, n_inputs, ops=None):
     import onnx
     from onnx import TensorProto, helper
     from rknn.api import RKNN
+    n_adds = n_inputs - 1
+    if ops is None:
+        ops = ["Add"] * n_adds
     shape = [rows, cols]
+    ins, outp = input_output_names(n_inputs)
     onnx_path = str(ROOT / f"_gen_{rows}x{cols}.onnx")
-    if n_inputs == 2:
-        x = helper.make_tensor_value_info("x", TensorProto.FLOAT16, shape)
-        y = helper.make_tensor_value_info("y", TensorProto.FLOAT16, shape)
-        z = helper.make_tensor_value_info("z", TensorProto.FLOAT16, shape)
-        node = helper.make_node("Add", ["x", "y"], ["z"], name="add")
-        g = helper.make_graph([node], "add", [x, y], [z])
-    elif n_inputs == 3:
-        a = helper.make_tensor_value_info("a", TensorProto.FLOAT16, shape)
-        b = helper.make_tensor_value_info("b", TensorProto.FLOAT16, shape)
-        c = helper.make_tensor_value_info("c", TensorProto.FLOAT16, shape)
-        d = helper.make_tensor_value_info("d", TensorProto.FLOAT16, shape)
-        add1 = helper.make_node("Add", ["a", "b"], ["t"], name="add1")
-        add2 = helper.make_node("Add", ["t", "c"], ["d"], name="add2")
-        g = helper.make_graph([add1, add2], "add3", [a, b, c], [d])
-    else:
-        a = helper.make_tensor_value_info("a", TensorProto.FLOAT16, shape)
-        b = helper.make_tensor_value_info("b", TensorProto.FLOAT16, shape)
-        c = helper.make_tensor_value_info("c", TensorProto.FLOAT16, shape)
-        d = helper.make_tensor_value_info("d", TensorProto.FLOAT16, shape)
-        e = helper.make_tensor_value_info("e", TensorProto.FLOAT16, shape)
-        add1 = helper.make_node("Add", ["a", "b"], ["t1"], name="add1")
-        add2 = helper.make_node("Add", ["t1", "c"], ["t2"], name="add2")
-        add3 = helper.make_node("Add", ["t2", "d"], ["e"], name="add3")
-        g = helper.make_graph([add1, add2, add3], "add4", [a, b, c, d], [e])
+    vis = [helper.make_tensor_value_info(nm, TensorProto.FLOAT16, shape) for nm in ins]
+    vout = helper.make_tensor_value_info(outp, TensorProto.FLOAT16, shape)
+    n_inter = n_inputs - 2
+    nodes, acc = [], ins[0]
+    for i in range(1, n_inputs):
+        if i == n_inputs - 1:
+            res = outp
+        elif n_inter == 1:
+            res = "t"
+        else:
+            res = f"t{i}"
+        op_name = ops[i - 1]
+        nodes.append(helper.make_node(op_name, [acc, ins[i]], [res],
+                                      name=f"{op_name.lower()}{i}"))
+        acc = res
+    g = helper.make_graph(nodes, "ew_gen", vis, [vout])
     m = helper.make_model(g, producer_name="rknn_add_gen",
                           opset_imports=[helper.make_opsetid("", 13)])
     onnx.save(m, onnx_path)
     rk = RKNN(verbose=False)
     try:
         rk.config(target_platform="rk3588", float_dtype="float16")
-        if n_inputs == 2:
-            rk.load_onnx(model=onnx_path, inputs=["x", "y"], input_size_list=[shape, shape])
-        else:
-            rk.load_onnx(model=onnx_path, inputs=["a", "b", "c"],
-                         input_size_list=[shape, shape, shape])
+        rk.load_onnx(model=onnx_path, inputs=ins, input_size_list=[shape] * n_inputs)
         rk.build(do_quantization=False)
         rk.export_rknn(out)
     finally:
         rk.release()
-    print(f"generated {out}: {rows}x{cols} N={rows*cols} ({n_inputs}-input, via toolkit)")
+    op_desc = "+".join(ops)
+    print(f"generated {out}: {rows}x{cols} N={rows*cols} ({n_inputs}-input {op_desc}, via toolkit)")
 
 
 def main():
@@ -455,21 +504,37 @@ def main():
     ap.add_argument("--cols", type=int, required=True)
     ap.add_argument("--inputs", type=int, default=2, choices=range(2, 9), metavar="2..8",
                     help="number of inputs: 2 for z=x+y, 3 for d=a+b+c (default: 2)")
+    ap.add_argument("--op", choices=["Add", "Mul"], default=None,
+                    help="element-wise operation applied uniformly (Add or Mul)")
+    ap.add_argument("--ops", type=str, default=None,
+                    help="comma-separated per-op list, e.g. Mul,Add for d=(a*b)+c")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--emit-parts", action="store_true")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--allow-toolkit", action="store_true",
                     help="for N>%d, fall back to the on-device toolkit build" % MAX_N)
     a = ap.parse_args()
+    n_adds = a.inputs - 1
+    if a.ops:
+        ops = [o.strip() for o in a.ops.split(",")]
+        bad = [o for o in ops if o not in ("Add", "Mul")]
+        if bad:
+            raise SystemExit(f"unknown ops: {bad} (valid: Add, Mul)")
+        if len(ops) != n_adds:
+            raise SystemExit(f"expected {n_adds} ops for {a.inputs} inputs, got {len(ops)}")
+    elif a.op:
+        ops = [a.op] * n_adds
+    else:
+        ops = ["Add"] * n_adds
     N = a.rows * a.cols
     if N > MAX_N:
         if not a.allow_toolkit:
             raise SystemExit(f"N={N} > {MAX_N} (max {MAX_TILES} tiles x "
                              f"{MAX_C1_PER_TILE} surfaces x {SURF_W}). "
                              f"Re-run with --allow-toolkit.")
-        generate_via_toolkit(a.rows, a.cols, a.out, a.inputs)
+        generate_via_toolkit(a.rows, a.cols, a.out, a.inputs, ops)
     else:
-        generate(a.rows, a.cols, a.out, a.inputs, a.emit_parts)
+        generate(a.rows, a.cols, a.out, a.inputs, a.emit_parts, ops)
     if a.verify and verify(a.out, a.inputs) is False:
         sys.exit(1)
 
