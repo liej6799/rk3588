@@ -59,3 +59,19 @@ def test_chain_runs_on_npu(ops):
   except RuntimeError as e:
     pytest.skip(f"NPU runtime unavailable: {e}")
   np.testing.assert_allclose(np.asarray(out).reshape(-1)[:N], _expected(ops, ins))
+
+def test_session_reuse_one_load_many_runs():
+  # RknnSession: load+init the MULACC model once, run inference many times (different inputs)
+  pytest.importorskip("rknn")
+  from helpers.rknn_synth import chain_to_rknn
+  from helpers.rknn_run import RknnSession
+  rng = np.random.default_rng(2)
+  blob = chain_to_rknn(["Mul", "Add"], N, 4, 4)
+  try:
+    with RknnSession(blob) as sess:
+      for _ in range(4):
+        a, b, c = (rng.integers(0, 4, N).astype(np.float16) for _ in range(3))
+        out = np.asarray(sess.run([a, b, c])[0]).reshape(-1)[:N].astype(np.float32)
+        np.testing.assert_allclose(out, a.astype(np.float32) * b.astype(np.float32) + c.astype(np.float32))
+  except RuntimeError as e:
+    pytest.skip(f"NPU runtime unavailable: {e}")

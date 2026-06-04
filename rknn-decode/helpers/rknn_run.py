@@ -5,12 +5,55 @@ Wraps the rknn-toolkit2 runtime flow (load_rknn -> init_runtime -> inference) so
 toolkit only loads from a file path, so bytes are routed through a tmpfs dir
 (RAM-backed) that is removed before returning. rknn-toolkit2 is imported lazily.
 
-    from helpers.rknn_export import onnx_to_rknn_bytes
-    from helpers.rknn_run import run_rknn
-    out = run_rknn(onnx_to_rknn_bytes(model), [a, b])    # list of output ndarrays
+    from helpers.rknn_run import run_rknn, RknnSession
+    out = run_rknn(model_bytes, [a, b])                  # one-shot: load + init + infer + release
+    with RknnSession(model_bytes) as s:                  # reuse: one load + init, many infers
+      for ...: out = s.run([a, b])
 """
 import os, shutil, tempfile
 from .rknn_export import _tmpfs_dir
+
+
+class RknnSession:
+  """Load a .rknn once and run inference many times (a single load + init_runtime).
+
+  Use when the same model is run repeatedly with different inputs (e.g. a matmul's K
+  accumulation steps all run the same MULACC model) -- it avoids paying the NPU context
+  setup on every call. `model` is .rknn bytes or a path. Use as a context manager.
+
+      with RknnSession(blob) as sess:
+        for ...: out = sess.run([a, b, acc])
+  """
+  def __init__(self, model, target: str = "rk3588", core_mask: int = 0, verbose: bool = False):
+    from rknn.api import RKNN
+    self._work = None
+    if isinstance(model, (bytes, bytearray)):
+      self._work = tempfile.mkdtemp(prefix="rknn_", dir=_tmpfs_dir())
+      path = os.path.join(self._work, "model.rknn")
+      with open(path, "wb") as f: f.write(bytes(model))
+      model = path
+    self._rknn = RKNN(verbose=verbose)
+    try:
+      if self._rknn.load_rknn(model) != 0:
+        raise RuntimeError(f"rknn.load_rknn failed for {model}")
+      if self._rknn.init_runtime(target=target, core_mask=core_mask) != 0:
+        raise RuntimeError(f"rknn.init_runtime failed (target={target}); is the NPU runtime available?")
+    except BaseException:
+      self.close()                                         # don't leak the runtime / tmpfs dir
+      raise
+
+  def run(self, inputs) -> list:
+    return self._rknn.inference(inputs=list(inputs))
+
+  def close(self):
+    if self._rknn is not None:
+      self._rknn.release(); self._rknn = None
+    if self._work is not None:
+      shutil.rmtree(self._work, ignore_errors=True); self._work = None
+
+  def __enter__(self): return self
+  def __exit__(self, *exc): self.close()
+
 
 def run_rknn(model, inputs, target: str = "rk3588", core_mask: int = 0, verbose: bool = False) -> list:
   """Run inference on a .rknn model and return the list of output arrays.

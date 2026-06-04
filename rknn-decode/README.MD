@@ -14,7 +14,7 @@ rknn-decode/
 │   ├── interp.py       #   run_uops(uops, buffers): execute a range-free graph
 │   ├── onnx_export.py  #   uops_to_onnx(uops) / print_onnx_graph(model): build + print an ONNX graph
 │   ├── rknn_export.py  #   onnx_to_rknn_bytes(model): build a .rknn for the RK3588 NPU (in RAM)
-│   ├── rknn_run.py     #   run_rknn(model, inputs) / print_rknn_graph(model): run / print a .rknn on the NPU
+│   ├── rknn_run.py     #   run_rknn / RknnSession (load once, run many) / print_rknn_graph
 │   ├── rknn_decode.py  #   decode_rknn(model): disassemble a .rknn (FlatBuffer graph + NPU command queue)
 │   ├── rknn_encode.py  #   recreate_rknn(model): rebuild a .rknn from its decoded form (byte-exact)
 │   ├── rknn_synth.py   #   uops_to_rknn / chain_to_rknn: synthesize a .rknn from UOps / op-chains (no onnx, no toolkit)
@@ -323,6 +323,13 @@ single toolkit-free `.rknn`:
 # matmul 8x8x8 = 8 MULACC toolkit-free NPU ops in ~2.6s
 # NPU == numpy matmul: True
 ```
+
+The K MULACC steps all run the **same** model (only the inputs change), so `matmul_npu`
+synthesizes the MULACC `.rknn` once and loads it into one `RknnSession` (a single
+`load_rknn` + `init_runtime`); the K steps are just `inference` calls. That setup dominates,
+so 8×8 and 16×16 both run in ~2s (the per-step cost is tiny). It can't be fused to a
+*single* inference — the dot-product `Σ a·b` isn't a left-associated op-chain — but it's one
+NPU context, not K.
 
 (Broadcasts are host-side numpy; the arithmetic — multiply + accumulate — runs on the NPU
 via toolkit-free element-wise tiles. The chain synth handles **2–7 inputs / 1–6 mixed ops**

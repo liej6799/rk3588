@@ -13,18 +13,22 @@ import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # make project root importable
 
 import numpy as np
-from helpers.rknn_synth import run_chain_on_npu
+from helpers.rknn_synth import chain_to_rknn
+from helpers.rknn_run import RknnSession
 
 def matmul_npu(A, B, M, K, N):
   """out[i,j] = sum_k A[i,k]*B[k,j] (A: M*K, B: K*N, flat fp16), via K fused multiply-
-  accumulate (MULACC) NPU ops. Each step is ONE toolkit-free .rknn doing col*row + acc
-  (a mixed Mul+Add op-chain). Returns the M*N output (fp16)."""
+  accumulate (MULACC) steps. The MULACC model (col*row + acc, a Mul+Add op-chain) is
+  synthesized toolkit-free ONCE and loaded into ONE NPU session; the K accumulation steps
+  are just inference calls on it. Returns the M*N output (fp16)."""
   A2, B2 = A.reshape(M, K), B.reshape(K, N)
   acc = np.zeros(M * N, dtype=np.float16)
-  for k in range(K):
-    col = np.repeat(A2[:, k], N).astype(np.float16)         # col[i*N+j] = A[i,k]  (broadcast over j)
-    row = np.tile(B2[k], M).astype(np.float16)              # row[i*N+j] = B[k,j]  (broadcast over i)
-    acc = np.asarray(run_chain_on_npu(["Mul", "Add"], [col, row, acc])).reshape(-1)[:M*N].astype(np.float16)
+  blob = chain_to_rknn(["Mul", "Add"], M * N)               # one toolkit-free MULACC .rknn
+  with RknnSession(blob) as sess:                           # one load + one init_runtime
+    for k in range(K):
+      col = np.repeat(A2[:, k], N).astype(np.float16)       # col[i*N+j] = A[i,k]  (broadcast over j)
+      row = np.tile(B2[k], M).astype(np.float16)            # row[i*N+j] = B[k,j]  (broadcast over i)
+      acc = np.asarray(sess.run([col, row, acc])[0]).reshape(-1)[:M*N].astype(np.float16)
   return acc
 
 def main():
