@@ -31,7 +31,8 @@ rknn-decode/
 │   ├── run.py          #   load the uops, fully unroll, and print both
 │   ├── viz.py          #   host the ONNX graph (Gather/Mul/Concat) or synth .rknn in netron
 │   ├── disasm.py       #   disassemble the toolkit-free synthesized mul .rknn
-│   └── synth.py        #   mul UOps -> .rknn (no onnx/toolkit) -> run on NPU
+│   ├── synth.py        #   mul UOps -> .rknn (no onnx/toolkit) -> run on NPU
+│   └── pipeline.py     #   upcast UOps -> ONNX -> rknn -> NPU, decoded at each stage
 ├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
 │   └── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
@@ -272,6 +273,22 @@ python3 -m mul_ops.run --upcast               # the vectorized vec(4) UOp listin
 (This is a host-codegen detail: the scalar and vectorized forms compute the same thing and
 synthesize the same NPU `.rknn` — `uops_to_rknn` keys off the element count and op, not the
 vectorization.)
+
+The upcasted UOps can also be lowered the **other** way — through ONNX and the toolkit — to
+see the full path down to the raw NPU command. `uops_to_onnx` handles the vectorized ops
+(`CAST`/vec `LOAD` → `Gather` of n contiguous indices, `GEP` → `Gather` of one lane,
+`STACK` → `Concat`), so the upcast graph becomes a verbose ONNX (250 Gather / 100 Mul / 26
+Concat). Compiling that with the toolkit **re-fuses it back to a single `Mul`** → one
+`EW_BINARY` tile on the NPU:
+
+```sh
+.venv/bin/python3 -m mul_ops.pipeline         # upcast UOps -> ONNX -> rknn -> NPU
+# [1] UPCAST UOPS (579)  ->  [2] ONNX {Gather:250, Mul:100, Concat:26}
+# [3] RKNN nodes {Mul:1}, command {EW_BINARY:1, COPY:4}  ->  [4] NPU == a*b
+```
+
+So whether the multiply enters as scalar UOps, vectorized UOps, or a verbose ONNX, it ends
+up as the same single element-wise tile on the NPU.
 
 **Reductions / matmul (`matmul_ops`).** The UOp layer also handles `Ops.REDUCE`: a matmul
 `out[i,j] = Σ_k a[i,k]·b[k,j]` (three loops, one of them a `REDUCE`) builds, and

@@ -61,3 +61,31 @@ def test_upcast_add():
 def test_upcast_requires_divisible():
   with pytest.raises(ValueError):
     upcast_elementwise(make_mul_uops(3, 3), 4)               # N=9 not divisible by 4
+
+def test_upcast_to_onnx_runs():
+  import numpy as np
+  import onnx
+  import onnxruntime as ort
+  from helpers.onnx_export import uops_to_onnx
+  m = uops_to_onnx(upcast_elementwise(make_mul_uops(10, 10), 4), name="mul_upcast")
+  onnx.checker.check_model(m)
+  ops = Counter(n.op_type for n in m.graph.node)
+  # 50 vec loads x Gather(4) + 200 GEP x Gather(1) = 250 Gather; 100 Mul; 25 STACK + 1 out Concat
+  assert ops["Gather"] == 250 and ops["Mul"] == 100 and ops["Concat"] == 26
+  A = (np.arange(100) % 7).astype(np.float16)
+  B = (np.arange(100) % 5 + 1).astype(np.float16)
+  sess = ort.InferenceSession(m.SerializeToString(), providers=["CPUExecutionProvider"])
+  out = sess.run(None, {"input1": A, "input2": B})[0].reshape(-1)[:100].astype(np.float32)
+  np.testing.assert_allclose(out, A.astype(np.float32) * B.astype(np.float32))
+
+def test_upcast_onnx_to_rknn_collapses_to_mul():
+  pytest.importorskip("rknn")
+  import numpy as np
+  from helpers.onnx_export import uops_to_onnx
+  from helpers.rknn_export import onnx_to_rknn_bytes
+  from helpers.rknn_decode import decode_rknn
+  m = uops_to_onnx(upcast_elementwise(make_mul_uops(10, 10), 4), name="mul_upcast")
+  d = decode_rknn(onnx_to_rknn_bytes(m))
+  # the toolkit re-fuses the verbose Gather/GEP/Mul/Concat back to a single Mul + EW tile
+  assert sum(n["op"] == "Mul" for n in d["nodes"]) == 1
+  assert any(b["kind"].startswith("EW_BINARY") for b in d["command_queue"])
