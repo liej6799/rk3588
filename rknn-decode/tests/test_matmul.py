@@ -50,3 +50,38 @@ def test_interp_matches_numpy_matmul(n):
 def test_synth_rejects_matmul():
   with pytest.raises(ValueError, match="element-wise add|matmul"):
     uops_to_rknn(fully_unroll(make_matmul_uops(8)))        # add-only synthesizer
+
+def _matmul_io(n):
+  rng = np.random.default_rng(0)
+  A = rng.integers(0, 5, n * n).astype(np.float32)        # float matmul; small ints stay exact
+  B = rng.integers(0, 5, n * n).astype(np.float32)
+  ref = (A.reshape(n, n) @ B.reshape(n, n)).reshape(-1)
+  return A, B, ref
+
+def test_matmul_onnx_runs():
+  import onnx
+  import onnxruntime as ort
+  from helpers.onnx_export import uops_to_onnx
+  m = uops_to_onnx(fully_unroll(make_matmul_uops(8)), name="matmul_8x8")
+  onnx.checker.check_model(m)
+  from collections import Counter
+  ops = Counter(nd.op_type for nd in m.graph.node)
+  # MULACC -> Mul + Add: 64 seed MUL + 448 from MULACC = 512 Mul, 448 Add; 128 CSE'd Gathers
+  assert ops["Mul"] == 512 and ops["Add"] == 448 and ops["Gather"] == 128
+  A, B, ref = _matmul_io(8)
+  sess = ort.InferenceSession(m.SerializeToString(), providers=["CPUExecutionProvider"])
+  out = sess.run(None, {"input1": A, "input2": B})[0].reshape(-1)[:64].astype(np.float32)
+  np.testing.assert_allclose(out, ref)
+
+def test_matmul_runs_on_npu():
+  pytest.importorskip("rknn")
+  from helpers.onnx_export import uops_to_onnx
+  from helpers.rknn_export import onnx_to_rknn_bytes
+  from helpers.rknn_run import run_rknn
+  blob = onnx_to_rknn_bytes(uops_to_onnx(fully_unroll(make_matmul_uops(8)), name="matmul_8x8"))
+  A, B, ref = _matmul_io(8)
+  try:
+    out = run_rknn(blob, [A, B], target="rk3588")
+  except RuntimeError as e:
+    pytest.skip(f"NPU runtime unavailable: {e}")
+  np.testing.assert_allclose(np.array(out[0]).reshape(-1)[:64].astype(np.float32), ref)

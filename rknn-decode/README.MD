@@ -34,7 +34,8 @@ rknn-decode/
 │   ├── synth.py        #   mul UOps -> .rknn (no onnx/toolkit) -> run on NPU
 │   └── pipeline.py     #   upcast UOps -> ONNX -> rknn -> NPU, decoded at each stage
 ├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
-│   └── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
+│   ├── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
+│   └── run.py          #   matmul UOps -> ONNX -> RKNN -> NPU, verified vs numpy
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
 │   ├── run.py          #   load the uops, then fully unroll and print
@@ -306,7 +307,21 @@ kernel (`UNROLL axis=0`). For 8×8 this matches tinygrad's op counts (64 `STORE`
 448 `MULACC`, 0 `RANGE`); CSE (hash-consing) dedups the shared `a[i,k]`/`b[k,j]` loads to
 128 (tinygrad further vec4-groups the contiguous `a` loads to 80, and uses a
 scheduler-specific op order). Verified against numpy by the interpreter
-(`tests/test_matmul.py`). But matmul is **not** an
+(`tests/test_matmul.py`).
+
+Since `MULACC` now lowers to ONNX (`Mul` + `Add`), the whole matmul also runs through
+**ONNX → RKNN → NPU**: the toolkit compiles the (scalar) Mul/Add graph into a large
+element-wise tile program (8×8 → ~1391 command blocks: 553 `EW_BINARY` + reshape/split/
+concat) and the NPU result equals `a @ b`:
+
+```sh
+.venv/bin/python3 -m matmul_ops.run            # 8x8 UOps -> ONNX -> RKNN -> NPU == numpy
+```
+
+This is correct but not efficient — we feed the toolkit the fully-unrolled scalar matmul,
+not an ONNX `Gemm`, so it never recognizes the matmul and emits hundreds of element-wise
+tiles. It still can't be synthesized *toolkit-free* (no matmul/conv command-stream emitter);
+`uops_to_rknn` rejects it. But matmul is **not** an
 element-wise add, so `uops_to_rknn` deliberately rejects it: the NPU matmul/conv engine
 (the `CNA`/`CORE` blocks) is a separate command stream that the toolkit-free synthesizer
 does not emit. So matmul is reproducible/verifiable at the UOp level, but not yet runnable
