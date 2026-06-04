@@ -1,19 +1,10 @@
-"""rknn_flatbuf.py - Build RKNN FlatBuffer body for fp16 element-wise Add.
+"""Build RKNN FlatBuffer bodies for fp16 element-wise Add/Sub/Mul/Div.
 
-Two build modes:
-  - TEMPLATE PATCHING (default, loadable by runtime): loads the reference
-    template body (raw _body_add{n}_10x10.body files; see decode_embedded_bodies.py),
-    patches tensor shapes, memory plan, and regcmd blocks in-place for the target shape.
-  - FROM SCRATCH (build_body_scratch): builds the FlatBuffer using the
-    flatbuffers library + rc_template_gen.  Useful for understanding the
-    structure, but the runtime rejects it because the FlatBuffer lacks the
-    embedded byte vectors (task descriptor table, regcmd metadata) that the
-    reference templates contain.
-
-No rknn-toolkit2 dependency.
+build_body() is the toolkit-free production path for 2..16 inputs.  It builds the
+FlatBuffer metadata, register-command stream, and task descriptor data from
+decoded formulas/templates.  build_body_scratch() keeps the old reference-body
+splice path for reverse-engineering comparisons only.
 """
-import base64
-import gzip
 import math
 import struct
 from pathlib import Path
@@ -28,17 +19,15 @@ MAX_C1_PER_TILE = (MAX_CH + 1) // 8
 BLOCKS_PER_ADD = 6
 MAX_TILES = BLOCKS_PER_ADD
 HEADER_SIZE = 0x40
+MAX_INPUTS = 16
+SUPPORTED_INPUTS = range(2, MAX_INPUTS + 1)
 
 _DPU = 0x1001
 _RDMA = 0x2001
 _TARGETS = {0x0101, 0x0201, 0x0801, _DPU, _RDMA, 0x4001,
             0x8001, 0x10001, 0x20001, 0x40001}
 
-_RC_TEMPLATES = rc_template_gen.all_templates()
-for _n_ext in (5, 6, 7):
-    _p = Path(__file__).resolve().parent / f"_rc_add{_n_ext}.bin"
-    if _p.exists():
-        _RC_TEMPLATES[_n_ext] = _p.read_bytes()
+_RC_TEMPLATES = rc_template_gen.all_templates(max_n=MAX_INPUTS)
 
 _EMBEDDED = {}
 
@@ -676,10 +665,11 @@ def _build_nodes(b, n_inputs, ins, outp, n_adds, idx, ops=None):
     return noffs
 
 
-def _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp):
+def _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp, n_external=None):
     tvec = _ovec(b, toffs)
     nvec = _ovec(b, noffs)
     n_inputs = len(ins)
+    n_ext = n_external if n_external is not None else n_inputs
     sg_f4 = _ovec(b, [
         _vec_table3(b, [0] * 10, [0x3f800000] * 10, list(range(10)))
         for _ in ins
@@ -691,7 +681,7 @@ def _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp):
     sg_f7 = _ovec(b, sg_f7_tables)
     sg_f10 = _vec(b, [0, 0, 0, n_adds, n_adds * 3])
     sg_f12 = _ovec(b, [_str_scalar_table2(b, outp, n_adds)])
-    sg_f2 = _vec(b, [idx[nm] for nm in ins])
+    sg_f2 = _vec(b, [idx[ins[i]] for i in range(n_ext)])
     sg_f3 = _vec(b, [idx[outp]])
     evs = [_ev(b) for _ in range(7)]
 
@@ -717,8 +707,9 @@ def _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp):
     b.PrependUOffsetTRelative(sg)
     return b.EndVector()
 
-def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
-    ins, outp = _io(n_inputs)
+def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inputs=None):
+    rc_n = n_rc_inputs if n_rc_inputs is not None else n_inputs
+    ins, outp = _io(rc_n)
     s_target = _str(b, "RKNPU v2")
     s_toolkit = _str(b, "2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16))")
     s_platform = _str(b, "rk3588")
@@ -733,8 +724,8 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
     root_f16 = _str(b, "static_shape")
     root_f17 = _ev(b)
     root_f18 = _ev(b)
-    root_f19 = _u64_table2(b, 192 + (n_inputs - 2) * 64, 1472 + (n_inputs - 2) * 320)
-    root_ev3 = _str(b, _root_attrs(n_inputs, N))
+    root_f19 = _u64_table2(b, 192 + (rc_n - 2) * 64, 1472 + (rc_n - 2) * 320)
+    root_ev3 = _str(b, _root_attrs(rc_n, N))
     root_ev11 = _str(b, "")
     b.StartObject(22)
     b.PrependUint32Slot(21, 1, 0)
@@ -748,6 +739,7 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
     b.PrependUOffsetTRelativeSlot(13, root_f13, 0)
     b.PrependUOffsetTRelativeSlot(12, root_f12, 0)
     b.PrependUOffsetTRelativeSlot(11, root_ev11, 0)
+    b.PrependUint8Slot(10, 2, 0)
     b.PrependUOffsetTRelativeSlot(9, s_framework, 0)
     b.PrependUOffsetTRelativeSlot(8, s_platform, 0)
     b.PrependUOffsetTRelativeSlot(7, s_toolkit, 0)
@@ -756,7 +748,6 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
     b.PrependUOffsetTRelativeSlot(2, sgvec, 0)
     b.PrependUOffsetTRelativeSlot(1, s_target, 0)
     b.PrependUint32Slot(0, 6, 0)
-    b.PrependUint8Slot(10, 2, 0)
     root = b.EndObject()
 
     b.Finish(root, b"RKNN")
@@ -764,15 +755,16 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
     ew_ops = None
     if ops:
         ew_ops = [rc_template_gen.ew_op_id(o) for o in ops]
-    rc_raw = rc_template_gen.build_template(n_inputs, ew_ops)
-    taskdesc = _taskdesc(n_inputs)
+    rc_n = n_rc_inputs if n_rc_inputs is not None else n_inputs
+    rc_raw = rc_template_gen.build_template(rc_n, ew_ops)
+    taskdesc = _taskdesc(rc_n)
 
     full = fb + rc_raw + taskdesc
     rc_len = len(rc_raw)
     fb_len = len(fb)
     root_off = struct.unpack_from("<I", full, 0)[0]
     if root_off == 60 and full[8:12] == b"\x00\x00\x00\x00":
-        if n_inputs == 2:
+        if rc_n == 2:
             del full[8:12]
             struct.pack_into("<I", full, 0, 56)
             fb_len -= 4
@@ -780,12 +772,12 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
             full[8:8] = b"\x00\x00\x00\x00"
             struct.pack_into("<I", full, 0, 64)
             fb_len += 4
-    elif root_off == 56 and n_inputs in (3, 4):
+    elif root_off == 56 and rc_n in (3, 4):
         full[8:8] = b"\x00" * 8
         struct.pack_into("<I", full, 0, 64)
         fb_len += 8
 
-    required_mod = 4 if n_inputs % 2 == 0 else 0
+    required_mod = 4 if rc_n % 2 == 0 else 0
     pad = (required_mod - fb_len % 8) % 8
     if pad:
         full[fb_len:fb_len] = b"\x00" * pad
@@ -793,7 +785,7 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
 
     _patch_regcmd(full, fb_len, n_adds, C1, W, tiles, ops)
 
-    rc_target = _rc_target_offset(rc_raw, n_inputs)
+    rc_target = _rc_target_offset(rc_raw, rc_n)
     root_rt = struct.unpack_from("<I", full, 0)[0]
     for field_idx, offset in [(20, rc_target), (21, rc_len + rc_target + 4)]:
         ab = _fb_field_abs(full, root_rt, field_idx)
@@ -853,7 +845,8 @@ def _taskdesc(n_inputs):
     if n_inputs == 2:
         words = [0] + rec_out + rec_in + rec_in + [0]
     else:
-        words = [0, 0] + rec_in * n_inputs + [0, 0]
+        leading_zeros = n_inputs // 3 + 1
+        words = [0] * leading_zeros + rec_in * 3 + [0]
     return struct.pack(f"<{len(words)}Q", *words)
 
 
@@ -1174,31 +1167,55 @@ def build_body_scratch(N, n_inputs):
 
 
 def _build_body_scratch_flatbuffers(N, n_inputs, ops=None):
-    if n_inputs not in _RC_TEMPLATES:
+    min_ops = max(1, n_inputs - 1)
+    n_ops = len(ops) if ops and len(ops) >= min_ops else min_ops
+    is_multiop = n_ops > n_inputs - 1
+    n_external = n_inputs
+    n_virtual = n_ops + 1 if is_multiop else n_inputs
+    if n_virtual not in _RC_TEMPLATES:
         raise NotImplementedError(
-            f"pure FlatBuffers generation not available for {n_inputs} inputs; "
+            f"pure FlatBuffers generation not available for {n_inputs} inputs "
+            f"with {n_ops} ops (internal n={n_virtual}); "
             f"available: {sorted(_RC_TEMPLATES)}"
         )
     C1, W = surface_split(N)
     Npad = C1 * W
-    n_adds = n_inputs - 1
+    n_adds = n_virtual - 1
     tiles = tile_split(C1)
-    ins, outp = _io(n_inputs)
+    ins, outp = _io(n_virtual)
     ext = _align(N * 2)
     work = _align(Npad * 16)
-    plan = _mem(n_inputs)
+    plan = _mem(n_virtual)
+
+    idx = _tensor_indices(n_virtual, ins, outp, n_adds)
+
+    if is_multiop:
+        for k in range(n_external, n_virtual):
+            tgt = 1 + (k - 1) % (n_external - 1)
+            plan[ins[k]] = plan[ins[tgt]]
+            plan[f"{ins[k]}_rs"] = plan[f"{ins[tgt]}_rs"]
 
     s5 = [1, C1, 1, W, 8]
     s4 = [1, C1, 1, W]
     s2 = [1, N]
 
-    idx = _tensor_indices(n_inputs, ins, outp, n_adds)
+    idx_nodes = dict(idx)
+    if is_multiop:
+        for k in range(n_external, n_virtual):
+            tgt = 1 + (k - 1) % (n_external - 1)
+            for suffix in ["", "_rs", "_exsec", "_rsi1"]:
+                src_key = f"{ins[tgt]}{suffix}"
+                dst_key = f"{ins[k]}{suffix}"
+                if src_key in idx_nodes:
+                    idx_nodes[dst_key] = idx_nodes[src_key]
 
     b = flatbuffers.Builder(65536)
 
-    noffs = _build_nodes(b, n_inputs, ins, outp, n_adds, idx, ops)
-    toffs = _build_tensors(b, n_inputs, ins, outp, n_adds, plan, idx,
+    noffs = _build_nodes(b, n_virtual, ins, outp, n_adds, idx_nodes, ops)
+    toffs = _build_tensors(b, n_virtual, ins, outp, n_adds, plan, idx,
                            s2, s4, s5, N, Npad, ext, work, C1, W)
-    sg = _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp)
-    fb_bytes, rc_bytes = _build_root(b, sg, n_adds, C1, W, tiles, N, n_inputs, ops)
+    n_sg2 = n_external if is_multiop else n_virtual
+    sg = _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp, n_sg2)
+    fb_bytes, rc_bytes = _build_root(b, sg, n_adds, C1, W, tiles, N, n_inputs, ops,
+                                     n_rc_inputs=n_virtual)
     return fb_bytes + rc_bytes

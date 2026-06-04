@@ -1,6 +1,6 @@
-"""rc_template_gen.py - Algorithmic generator for rknn_flatbuf._RC_TEMPLATES.
+"""Algorithmic regcmd template generator for chained element-wise RKNN models.
 
-Each RC template (n_inputs = 2..7+) is:
+Each supported RC template (n_inputs = 2..16) is:
 
     [OFF[n] zero bytes]                      alignment lead
     PREFIX[n] words                          header + cascade + chains + descriptors
@@ -13,6 +13,8 @@ PREFIX is generated algorithmically by _build_prefix(n).  CANON contains 52 DPU 
 fields (those _rc_patch_block overwrites at build time) are stored as 0.
 """
 import struct
+
+MAX_INPUTS = 16
 
 _DPU, _RDMA, _PC = 0x1001, 0x2001, 0x0101
 
@@ -171,7 +173,7 @@ def _build_prefix(n):
     even = (n % 2 == 0)
 
     if even:
-        n_lead = (n - 2) // 2 + 1
+        n_lead = min((n - 2) // 2 + 1, 3)
         str_w2 = 0x0031695f73725f78 if n == 2 else 0x0031695f73725f61
         header = [0] * n_lead + [0x0000000700000000, str_w2] + list(_EVEN_CORE)
     else:
@@ -197,7 +199,10 @@ def _build_prefix(n):
 
     words += [0x000000600000007c, 0x0000002800000044]
 
-    anomaly = 64 if n >= 6 else 0
+    # chain1/canon_base shrink by 64 for every 4 inputs (matches the toolkit's
+    # surface-tiling step). Verified byte-exact against the n=4,5,10..16 reference
+    # bodies; n=2..9 keep their original (n>=6 -> 64) value since (n-2)//4 == 1 there.
+    anomaly = 64 * ((n - 2) // 4)
     chain0 = 0x74 + 24 * (n - 2)
     chain1 = 0x15c + 280 * (n - 2) - anomaly
     canon_base = 0x1084 + 4120 * (n - 2) - anomaly
@@ -242,7 +247,10 @@ def _build_trailing(n):
               0x0000000000000001, 0x000000000000000a]
         if k < ng - 1:
             w += [0] * 3
-    w += [0] * max(0, 5 - 2 * ng)
+    trail = max(0, 5 - 2 * ng)
+    if ng == 3:
+        trail = 1
+    w += [0] * trail
     return w
 
 
@@ -251,6 +259,9 @@ def _canon_words(op=EW_OP_ADD):
 
 
 def build_template(n_inputs, ops=None):
+    if not 2 <= n_inputs <= MAX_INPUTS:
+        raise NotImplementedError(
+            f"regcmd template generation supports 2..{MAX_INPUTS} inputs, got {n_inputs}")
     n_adds = n_inputs - 1
     if ops is None:
         ops = [EW_OP_ADD] * n_adds
@@ -272,5 +283,8 @@ def build_template(n_inputs, ops=None):
 
 
 def all_templates(max_n=None):
-    upper = (max_n or 7) + 1
+    upper = max_n or MAX_INPUTS
+    if upper > MAX_INPUTS:
+        raise NotImplementedError(
+            f"regcmd template generation supports up to {MAX_INPUTS} inputs, got {upper}")
     return {n: build_template(n) for n in range(2, upper + 1)}

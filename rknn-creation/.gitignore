@@ -1,0 +1,17 @@
+.venv
+.venv/*
+__pycache__/
+*.pyc
+
+# Generated RKNN/ONNX artifacts
+*.rknn
+*.onnx
+*.fb
+*.trailer
+_body_*.body
+_rc_add*.bin
+
+# Local verifier binaries
+test_load
+rknn_verify
+rknn_verify_n
