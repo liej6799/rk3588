@@ -12,7 +12,16 @@ import pytest
 pytest.importorskip("rknn")                            # rknn-toolkit2
 from helpers.rknn_export import onnx_to_rknn, onnx_to_rknn_bytes
 from helpers.rknn_run import run_rknn, print_rknn_graph
-from add_ops.viz import build_model, build_rknn, show_rknn
+from helpers.kernel import to_onnx, compile_rknn
+from helpers.viz import serve
+from add_ops.uops import load_uops
+
+def build_model():
+  return to_onnx(load_uops(), name="add_5x5")
+def build_rknn():
+  return compile_rknn(load_uops(), name="add_5x5")
+def show_rknn(address=("0.0.0.0", 8080)):
+  return serve(build_rknn(), address=address, name="add_5x5.rknn")
 
 def test_export_bytes_in_memory():
   before = set(glob.glob("/dev/shm/rknn_*"))

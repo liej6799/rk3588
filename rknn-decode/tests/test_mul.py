@@ -58,16 +58,16 @@ def test_synth_selects_mul_ewop():
 
 def test_viz_onnx_graph_is_mul():
   import onnx
-  from mul_ops.viz import build_model
-  m = build_model()
+  from helpers.kernel import to_onnx
+  m = to_onnx(make_mul_uops(10, 10), name="mul_10x10")
   onnx.checker.check_model(m)
   ops = [n.op_type for n in m.graph.node]
-  # build_model auto-upcasts (vec(4)), so the ONNX is the vectorized form
+  # the unrolled mul auto-upcasts (vec(4)), so the ONNX is the vectorized form
   assert ops.count("Mul") == 100 and ops.count("Gather") == 250 and ops.count("Concat") == 26
 
 def test_disasm_synth_mul():
-  from mul_ops.viz import build_rknn
-  d = decode_rknn(build_rknn())
+  from helpers.kernel import synth_rknn
+  d = decode_rknn(synth_rknn(make_mul_uops(10, 10)))
   assert d["nodes"][0]["op"] == "InputOperator" and d["nodes"][-1]["op"] == "OutputOperator"
   ew = [b for b in d["command_queue"] if b["kind"].startswith("EW_BINARY")]
   assert ew and all(

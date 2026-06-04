@@ -5,7 +5,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 import onnx
 import pytest
 from helpers.viz import serve
-from add_ops.viz import build_model
+from helpers.kernel import to_onnx
+from add_ops.uops import load_uops
+
+def build_model():
+  return to_onnx(load_uops(), name="add_5x5")
 
 def test_build_model_is_valid():
   onnx.checker.check_model(build_model())            # the built graph is a valid model

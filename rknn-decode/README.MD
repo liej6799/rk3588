@@ -18,34 +18,19 @@ rknn-decode/
 │   ├── rknn_decode.py  #   decode_rknn(model): disassemble a .rknn (FlatBuffer graph + NPU command queue)
 │   ├── rknn_encode.py  #   recreate_rknn(model): rebuild a .rknn from its decoded form (byte-exact)
 │   ├── rknn_synth.py   #   uops_to_rknn / chain_to_rknn: synthesize a .rknn from UOps / op-chains (no onnx, no toolkit)
+│   ├── kernel.py       #   GENERIC DRIVER + CLI: dump / onnx / rknn / disasm / run+verify for any UOp kernel
 │   ├── _rknn_flatbuf.py#   vendored: build the FlatBuffer body + container from scratch
 │   ├── _rc_template_gen.py # vendored: generate the NPU register-command stream from scratch
 │   └── viz.py          #   serve(model): host an ONNX/.rknn model in netron
 ├── refs/               # vendored references (no external deps)
 │   └── rkt_registers.h #   rk3588 NPU register names, used to label the decoded command queue
-├── add2d_ops/          # example: 2D nested-loop half add (N=100), index i*cols+j
-│   ├── uops.py         #   make_add2d_uops(rows, cols): two RANGE loops + computed index
-│   └── synth.py        #   2D-loop UOps -> .rknn (no onnx/toolkit) -> run on NPU
-├── mul_ops/            # example: 2D-loop element-wise multiply z = a * b (N=100)
-│   ├── uops.py         #   make_mul_uops(rows, cols): the tinygrad test_mul kernel
-│   ├── run.py          #   load the uops, fully unroll, and print both
-│   ├── viz.py          #   host the ONNX graph (Gather/Mul/Concat) or synth .rknn in netron
-│   ├── disasm.py       #   disassemble the toolkit-free synthesized mul .rknn
-│   ├── synth.py        #   mul UOps -> .rknn (no onnx/toolkit) -> run on NPU
-│   └── pipeline.py     #   upcast UOps -> ONNX -> rknn -> NPU, decoded at each stage
-├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
-│   ├── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
-│   ├── run.py          #   matmul on the NPU as MULACC ops, toolkit-free (--perf prints eval_perf)
-│   └── viz.py          #   visualize the matmul ONNX graph or the MULACC step .rknn in netron
-├── add_ops/            # example: the 5x5 half `a + b` kernel
-│   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
-│   ├── run.py          #   load the uops, then fully unroll and print
-│   ├── run_rknn.py     #   run on the NPU and compare against onnxruntime + a + b
-│   ├── disasm.py       #   build the .rknn and statically disassemble it (offline)
-│   ├── recreate.py     #   rebuild the .rknn from its decoded form, compare to the library
-│   ├── synth.py        #   UOps -> .rknn with no onnx/toolkit, verify on the NPU
-│   └── viz.py          #   host the ONNX graph (or exported .rknn) in netron
-├── tests/              # pytest suite for helpers + the example
+│
+│   # Each example op is JUST a uops.py. All debug features come from helpers/kernel.py.
+├── add_ops/uops.py     # load_uops(): the 5x5 half `a + b` kernel (flat RANGE loop)
+├── add2d_ops/uops.py   # make_add2d_uops(rows, cols): 2D nested loops, index i*cols+j (N=100)
+├── mul_ops/uops.py     # make_mul_uops(rows, cols): element-wise multiply (tinygrad test_mul)
+├── matmul_ops/uops.py  # make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]  (REDUCE)
+├── tests/              # pytest suite for helpers + the examples
 │   ├── test_uop.py
 │   ├── test_unroll.py
 │   ├── test_add.py     #   load -> unroll -> execute -> check a + b
@@ -64,30 +49,42 @@ rknn-decode/
 └── README.MD
 ```
 
-`helpers/` is the shared library. Each example op lives in its own folder (e.g.
-`add_ops/`) holding a copied UOp snapshot plus a runner.
+`helpers/` is the shared library. **An example op is just a `uops.py`** — every debuggable
+feature is provided generically by `helpers/kernel.py`, so adding a custom kernel means
+writing only its UOps.
 
-## Run the example
-
-From the project root:
-
-```sh
-python3 -m add_ops.run
-```
-
-This loads the original 14 UOps for the 5x5 half add, then fully unrolls the loop
-(14 → 204 UOps, no RANGE left).
-
-### Visualize the ONNX graph
-
-Build the ONNX graph from the unrolled UOps and host it in [netron](https://github.com/lutzroeder/netron):
+## The driver — one CLI for every kernel
 
 ```sh
-.venv/bin/python3 -m add_ops.viz       # serve on http://0.0.0.0:8080
+python3 -m helpers.kernel <pkg> dump [--full]   # original -> unrolled UOps (summary or full)
+python3 -m helpers.kernel <pkg> onnx            # serve the ONNX graph in netron (from memory)
+python3 -m helpers.kernel <pkg> rknn            # serve the toolkit-free synthesized .rknn in netron
+python3 -m helpers.kernel <pkg> disasm [--regs] # decode + print the NPU command queue
+python3 -m helpers.kernel <pkg> run [--perf]    # synthesize -> run on NPU -> verify vs interpreter
 ```
 
-Then open the printed URL in a browser. Or from code: `from add_ops.viz import show; show()`.
-The graph is streamed to netron from memory — no `.onnx` file is written to disk.
+`<pkg>` is any example folder (`add_ops`, `add2d_ops`, `mul_ops`, `matmul_ops`) or your own
+— it just needs `uops.py` with `load_uops()`. Examples:
+
+```sh
+python3 -m helpers.kernel add_ops dump          # 14 -> 204 unrolled UOps (5x5 add)
+python3 -m helpers.kernel mul_ops onnx          # the multiply graph in netron
+python3 -m helpers.kernel matmul_ops run        # 8x8 matmul on the NPU == interpreter
+```
+
+Verification ground truth is the pure-Python interpreter (`helpers.interp`), so there's no
+hand-written reference per kernel. Element-wise kernels are synthesized toolkit-free and run
+directly; a reduction (matmul) runs via the element-wise MULACC decomposition
+(`helpers.kernel.matmul_npu`). From code: `from helpers.kernel import load, dump, run_verify;
+run_verify(load("add_ops"))`.
+
+### Adding a custom kernel
+
+Drop a `mykernel/uops.py` with a `load_uops()` returning your UOp graph (using
+`helpers.uop` — `UOp.range`, `.index`, `+`, `*`, `.reduce`, `.store`, `.sink`). Then every
+command above works on it: `python3 -m helpers.kernel mykernel run`.
+
+## Internals (what the driver is built on)
 
 ### Export to .rknn
 
@@ -96,9 +93,9 @@ Build the ONNX graph and convert it to a Rockchip `.rknn` for the RK3588 NPU wit
 **in memory** — `onnx_to_rknn_bytes` returns the `.rknn` as bytes:
 
 ```python
-from add_ops.viz import build_model
+from helpers.kernel import load, to_onnx
 from helpers.rknn_export import onnx_to_rknn_bytes
-blob = onnx_to_rknn_bytes(build_model())               # bytes; float16; target_platform="rk3588"
+blob = onnx_to_rknn_bytes(to_onnx(load("add_ops")))    # bytes; float16; target_platform="rk3588"
 ```
 
 Want a file instead? `onnx_to_rknn(model, "add_5x5.rknn")` wraps it and writes the
@@ -107,17 +104,17 @@ bytes out.
 Visualize the exported `.rknn` in netron (also served from memory):
 
 ```sh
-python3 -m add_ops.viz --rknn          # export to .rknn and serve on http://0.0.0.0:8080
+python3 -m helpers.kernel add_ops rknn   # serve the synthesized .rknn in netron
 ```
 
-Or from code: `from add_ops.viz import show_rknn; show_rknn()`.
+Or from code: `from helpers.kernel import load, serve_rknn; serve_rknn(load("add_ops"))`.
 
 ### Run the .rknn on the NPU
 
 Run the model on the RK3588 NPU and compare against onnxruntime (and `a + b`):
 
 ```sh
-.venv/bin/python3 -m add_ops.run_rknn
+.venv/bin/python3 -m helpers.kernel add_ops run
 ```
 
 On this kernel the NPU output bit-matches onnxruntime exactly (max abs diff 0.0).
@@ -127,7 +124,7 @@ On this kernel the NPU output bit-matches onnxruntime exactly (max abs diff 0.0)
 Dump the logical ONNX graph and the compiled NPU layer table side by side:
 
 ```sh
-.venv/bin/python3 -m add_ops.run_rknn --graph
+.venv/bin/python3 -m helpers.kernel add_ops disasm
 ```
 
 The ONNX listing shows the op graph (`Gather`/`Add`/`Concat`); the rknn side prints
@@ -139,9 +136,9 @@ is only available as this text table, not as an ONNX file.)
 Or from code:
 
 ```python
-from add_ops.viz import build_rknn
+from helpers.kernel import load, compile_rknn
 from helpers.rknn_run import run_rknn
-out = run_rknn(build_rknn(), [a, b], target="rk3588")  # list of output arrays
+out = run_rknn(compile_rknn(load("add_ops")), [a, b], target="rk3588")  # list of output arrays
 ```
 
 This needs the on-device NPU runtime (`librknnrt.so`); pass `target=None` to use the
@@ -164,8 +161,8 @@ NPU **register-command stream** into a command queue, labelling each 64-bit word
 `refs/rkt_registers.h`:
 
 ```sh
-.venv/bin/python3 -m add_ops.disasm           # graph + command-queue summary
-.venv/bin/python3 -m add_ops.disasm --regs    # also dump every decoded register
+.venv/bin/python3 -m helpers.kernel add_ops disasm          # graph + command-queue summary
+.venv/bin/python3 -m helpers.kernel add_ops disasm --regs   # also dump every decoded register
 ```
 
 From code:
@@ -199,7 +196,7 @@ library-generated model the result is **byte-identical** (same SHA-256) and stil
 correctly on the NPU:
 
 ```sh
-.venv/bin/python3 -m add_ops.recreate        # build with toolkit, recreate, compare bytes
+python3 -c 'from helpers.kernel import load, compile_rknn; from helpers.rknn_encode import recreate_rknn; b=compile_rknn(load("add_ops")); print(recreate_rknn(b)==b)'
 ```
 
 ```python
@@ -220,8 +217,7 @@ scratch — the FlatBuffer body, the **NPU register-command stream** (generated 
 `_rc_template_gen`, not copied from any library output), and the container:
 
 ```sh
-.venv/bin/python3 -m add_ops.synth            # 1x1, 3x3, 5x5 -> build -> run on NPU
-.venv/bin/python3 -m add_ops.synth 8 8        # custom size
+.venv/bin/python3 -m helpers.kernel add_ops run   # synth -> NPU -> verify vs interp
 ```
 
 ```python
@@ -246,7 +242,7 @@ product over both loops) the graph is the same flat per-element add, so `uops_to
 treats it identically — verified on the NPU for N=100 (10×10):
 
 ```sh
-.venv/bin/python3 -m add2d_ops.synth          # 10x10 = 100, toolkit-free, run on NPU
+.venv/bin/python3 -m helpers.kernel add2d_ops run   # 10x10 = 100, toolkit-free, run on NPU
 ```
 
 **Element-wise multiply (`mul_ops`).** `z = a * b` runs on the NPU toolkit-free too — same
@@ -256,7 +252,7 @@ Add vs Mul model). `uops_to_rknn` picks the op automatically from the UOp graph
 (`analyze_elementwise` returns `(N, ADD|MUL)`). Verified on the NPU for N=100:
 
 ```sh
-.venv/bin/python3 -m mul_ops.synth            # 10x10 = 100, z = a*b, toolkit-free
+.venv/bin/python3 -m helpers.kernel mul_ops run   # 10x10 = 100, z = a*b, toolkit-free
 ```
 
 **Auto-vectorization (UPCAST), like tinygrad.** `fully_unroll` doesn't just scalar-expand —
@@ -271,8 +267,8 @@ For the 10×10 mul this is **byte-for-byte identical** to tinygrad's `E_25_4` (5
 op/dtype/src on every line — `tests/test_upcast.py`); a 5×5 (N=25) stays scalar (204 UOps).
 
 ```sh
-python3 -m mul_ops.run            # 10x10 -> auto-upcast vec(4) listing (== E_25_4)
-python3 -m mul_ops.run 3 3        # N=9 (not divisible by 4) -> scalar unroll
+python3 -m helpers.kernel mul_ops dump          # 10x10 -> auto-upcast vec(4) listing (== E_25_4)
+python3 -m helpers.kernel mul_ops dump --full   # the full vectorized UOp list
 ```
 
 It's a host-codegen detail: scalar and vectorized forms compute the same thing and
@@ -286,10 +282,11 @@ see the full path down to the raw NPU command. `uops_to_onnx` handles the vector
 Concat). Compiling that with the toolkit **re-fuses it back to a single `Mul`** → one
 `EW_BINARY` tile on the NPU:
 
-```sh
-.venv/bin/python3 -m mul_ops.pipeline         # upcast UOps -> ONNX -> rknn -> NPU
-# [1] UPCAST UOPS (579)  ->  [2] ONNX {Gather:250, Mul:100, Concat:26}
-# [3] RKNN nodes {Mul:1}, command {EW_BINARY:1, COPY:4}  ->  [4] NPU == a*b
+```python
+from helpers.kernel import load, to_onnx, compile_rknn          # upcast UOps -> ONNX -> rknn
+from helpers.rknn_decode import decode_rknn
+m = to_onnx(load("mul_ops"))                                    # {Gather:250, Mul:100, Concat:26}
+d = decode_rknn(compile_rknn(load("mul_ops")))                  # toolkit re-fuses -> {Mul:1} node
 ```
 
 So whether the multiply enters as scalar UOps, vectorized UOps, or a verbose ONNX, it ends
@@ -320,7 +317,7 @@ So `A @ B` runs as K **MULACC** NPU ops: for each k, `acc = A[:,k]*B[k,:] + acc`
 single toolkit-free `.rknn`:
 
 ```sh
-.venv/bin/python3 -m matmul_ops.run            # 8x8 = 8 MULACC toolkit-free NPU ops
+.venv/bin/python3 -m helpers.kernel matmul_ops run   # 8x8 matmul on NPU == interp (8 MULACC ops)
 # matmul 8x8x8 = 8 MULACC toolkit-free NPU ops in ~2.6s
 # NPU == numpy matmul: True
 ```

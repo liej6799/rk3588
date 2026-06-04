@@ -16,7 +16,10 @@ from helpers.rknn_encode import encode_container, encode_reg, recreate_rknn
 from helpers.rknn_decode import decode_rknn, split_container, decode_reg
 
 pytest.importorskip("rknn")                            # needed to build the library model
-from add_ops.viz import build_rknn
+from helpers.kernel import compile_rknn
+from add_ops.uops import load_uops
+def build_rknn():
+  return compile_rknn(load_uops(), name="add_5x5")     # the library-generated .rknn
 
 @pytest.fixture(scope="module")
 def lib_model():

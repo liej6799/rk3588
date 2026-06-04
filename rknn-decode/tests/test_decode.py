@@ -11,7 +11,10 @@ import pytest
 from helpers.rknn_decode import decode_rknn, split_container, decode_reg, REG_NAMES
 
 pytest.importorskip("rknn")                            # only needed to build the sample
-from add_ops.viz import build_rknn
+from helpers.kernel import compile_rknn
+from add_ops.uops import load_uops
+def build_rknn():
+  return compile_rknn(load_uops(), name="add_5x5")     # toolkit-compiled add .rknn
 
 @pytest.fixture(scope="module")
 def model_bytes():
