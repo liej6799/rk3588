@@ -633,6 +633,114 @@ toolkit FlatBuffer skeleton, regenerate the command region from `rc_template_gen
 and `_taskdesc()`, then patch shapes, memory, and regcmds. For 2-input Add this is
 byte-identical to the live template-patching path and passes NPU verification.
 
+## 6d. Multi-Op Support: Add / Sub / Mul / Div Element-Wise Operations
+
+The generator now supports all 4 arithmetic element-wise ops (Add, Sub, Mul, Div) in
+any combination — single-op or multi-op chained. CLI: `--op {Add,Sub,Mul,Div}` for
+uniform ops or `--ops Mul,Add,Sub,Div` for per-operation assignment.
+
+### Four op-specific DPU registers
+
+Decoded from vendor reference models (Add/Sub/Mul/Div 10x10). Only 4 registers differ
+per op type; all other 67+ DPU/RDMA registers in the EW block are identical:
+
+| Register | Field | Add | Sub | Mul | Div |
+|----------|-------|-----|-----|-----|-----|
+| `0x4070` (DPU_EW_CFG) | op config | `0x108202c0` | `0x108402c0` | `0x108003c4` | `0x108303c0` |
+| `0x403c` (DATA_CUBE_CHANNEL) | channel geometry | `(ch<<16)\|ch` | `((W-1)<<16)\|ch` | `((W-1)<<16)\|ch` | `((W-1)<<16)\|ch` |
+| `0x4084` (DPU_OUT_RES) | output resolution | `0x00010001` | `0x00010001` | `0x00010001` | `0x00000001` |
+| `0x5044` (RDMA_BN_MUL) | batch norm multiplier | `0x00017849` | `0x00017849` | `0x00017849` | `0x00017841` |
+
+Key differences:
+- **EW_CFG** (0x4070): each op has a unique bit pattern (CVT_BYPASS, TRUNC_NEG, etc.).
+  These are **lookup table values** — NOT computed by bit manipulation (earlier attempts
+  to flip bit 2 were wrong; Sub/Mul/Div have different bit patterns).
+- **CHANNEL** (0x403c): Add uses `(ch<<16)|ch` (both fields = channel count - 1); all
+  others use `((W-1)<<16)|ch` (upper = width-1). Note: our flat layout uses W = total
+  elements (vendor uses a tiled W×C layout); both work on the NPU.
+- **Div uniquely** changes OUT_RES from `0x00010001` to `0x00000001` and BN_MUL from
+  `0x00017849` to `0x00017841`.
+
+### Per-group CANON blocks in `rc_template_gen.py`
+
+The template generator now accepts a per-group op list:
+
+```python
+build_template(n_inputs, ops=[EW_OP_MUL, EW_OP_ADD, EW_OP_SUB])
+```
+
+Each CANON block is parameterized with the correct EW_CFG, OUT_RES, and BN_MUL from
+lookup dicts (`_EW_CFG`, `_DPU_OUT_RES`, `_RDMA_BN_MUL`). The template emits blocks
+in **tile-major interleaved order**: `[tile0_op0, tile0_op1, ..., tile0_opK, tile1_op0, ...]`.
+
+### Three bugs found and fixed (multi-op 4+ inputs)
+
+NPU verification passed for 2-input and 3-input models but **failed** for 4+ inputs
+(max_err ~1600, completely wrong arithmetic). Root causes:
+
+**Bug 1 — Strided span grouping (CRITICAL).** The RC template emits blocks in
+tile-major order, but `_patch_regcmd` / `_patch_ew_ops` / `make_tiles` grouped them
+consecutively (`spans[g*k:(g+1)*k]`). This applied each op's config to a MIX of all
+ops' blocks — 67% of tiles got the wrong EW_CFG. Fix: strided selection
+`spans[g::n_adds]`. Affected:
+- `rknn_flatbuf.py:_patch_regcmd` (line 869)
+- `rknn_add_gen.py:_patch_ew_ops` (line 207)
+- `rknn_add_gen.py:make_tiles` (line 309)
+
+**Bug 2 — Missing f13 memory offset for d_rs (n_inputs=4).** A broken special case
+`not (n_inputs == 4 and nm == "d")` at `rknn_flatbuf.py:616` skipped the f13 memory
+offset field for the 4th input tensor. The runtime then read d_rs from offset 0 (aliased
+with the output buffer) instead of its correct slot. Fix: always set `has_f13=True`.
+
+**Bug 3 — Undersized task descriptor (n_inputs >= 4).** `_taskdesc()` hardcoded
+`rec_in * 3` for all `n_inputs >= 3`, producing only 3 input reshape records. For 4+
+inputs the hardware's task descriptor table was incomplete. Fix: `rec_in * n_inputs`.
+
+### NPU verification results
+
+All 16 tests pass (via `librknnrt.so` direct C API on the rk3588 NPU):
+
+| Test | Shape | Inputs | Ops | max_err | Result |
+|------|-------|--------|-----|---------|--------|
+| Add | 10x10 | 2 | Add | 0.001356 | PASS |
+| Sub | 10x10 | 2 | Sub | 0.001978 | PASS |
+| Mul | 10x10 | 2 | Mul | 0.002302 | PASS |
+| Div | 10x10 | 2 | Div | 0.017689 | PASS |
+| Mul+Sub | 10x10 | 3 | Mul,Sub | 0.001951 | PASS |
+| Div+Add+Mul | 10x10 | 4 | Div,Add,Mul | 0.064896 | PASS |
+| All4 | 10x10 | 5 | Mul,Add,Sub,Div | 0.050186 | PASS |
+| Mul | 32x32 | 2 | Mul | 0.006386 | PASS |
+| Mul+Sub | 32x32 | 3 | Mul,Sub | 0.004517 | PASS |
+| Div+Add+Mul | 32x32 | 4 | Div,Add,Mul | 0.110687 | PASS |
+| Mul | 64x64 | 2 | Mul | 0.004256 | PASS |
+| Mul+Sub | 64x64 | 3 | Mul,Sub | 0.004521 | PASS |
+| Div+Add+Mul | 64x64 | 4 | Div,Add,Mul | 1.156982 | PASS |
+| Mul | 128x128 | 2 | Mul | 0.005001 | PASS |
+| Mul+Sub | 128x128 | 3 | Mul,Sub | 0.007370 | PASS |
+| Div+Add+Mul | 128x128 | 4 | Div,Add,Mul | 6.939453 | PASS |
+
+The max_err increase with size for Div-containing chains is expected fp16 precision
+accumulation (Div amplifies small differences). All within `atol=0.1, rtol=0.02`.
+
+### Register comparison: generated vs vendor (10x10)
+
+Three critical op-type registers match **byte-exact** across all 4 ops:
+
+| Op | Register | Generated | Vendor | Match |
+|----|----------|-----------|--------|-------|
+| Add | EW_CFG | `0x108202c0` | `0x108202c0` | exact |
+| Sub | EW_CFG | `0x108402c0` | `0x108402c0` | exact |
+| Mul | EW_CFG | `0x108003c4` | `0x108003c4` | exact |
+| Div | EW_CFG | `0x108303c0` | `0x108303c0` | exact |
+| Div | OUT_RES | `0x00000001` | `0x00000001` | exact |
+| Div | BN_MUL | `0x00017841` | `0x00017841` | exact |
+
+Geometry registers (WIDTH, CHANNEL, strides) differ because our model uses a flat
+W=total_elements layout while the vendor uses a tiled W=rows layout. Both work on the
+NPU — verified for all 4 ops.
+
+---
+
 ## 7. Toolbox
 
 | file | role |

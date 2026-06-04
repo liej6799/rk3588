@@ -546,7 +546,7 @@ def _rc_patch_block(w, i, c, W, ch, base, st, op="Add"):
     for reg in (0x4030, 0x405c):
         _rc_set(w, i, c, _DPU, reg, W - 1)
     _rc_set(w, i, c, _RDMA, 0x500c, W - 1)
-    ch_val = ((W - 1) << 16 | ch) if op == "Mul" else (ch << 16 | ch)
+    ch_val = ((W - 1) << 16 | ch) if op != "Add" else (ch << 16 | ch)
     _rc_set(w, i, c, _DPU, 0x403c, ch_val)
     _rc_set(w, i, c, _DPU, 0x4058, ch)
     _rc_set(w, i, c, _RDMA, 0x5014, ch)
@@ -613,10 +613,9 @@ def _build_tensors(b, n_inputs, ins, outp, n_adds, plan, idx,
 
     for nm in reversed(ins):
         rs_name = f"{nm}_rs"
-        rs_has_f13 = not (n_inputs == 4 and nm == "d")
         toffs[idx[f"{nm}_rs"]] = _rs_tensor(
             b, rs_name, s5, s4, Npad * 16,
-            plan[rs_name][0] * work, has_f13=rs_has_f13)
+            plan[rs_name][0] * work, has_f13=True)
         toffs[idx[f"{nm}_exsec"]] = _exsec_tensor(
             b, f"{nm}_exSecondary", sec2, 1, _generate_exsec_f13(n_inputs)[nm], f1=None)
 
@@ -762,7 +761,10 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
 
     b.Finish(root, b"RKNN")
     fb = bytearray(b.Output())
-    rc_raw = rc_template_gen.build_template(n_inputs)
+    ew_ops = None
+    if ops:
+        ew_ops = [rc_template_gen.ew_op_id(o) for o in ops]
+    rc_raw = rc_template_gen.build_template(n_inputs, ew_ops)
     taskdesc = _taskdesc(n_inputs)
 
     full = fb + rc_raw + taskdesc
@@ -850,8 +852,8 @@ def _taskdesc(n_inputs):
     rec_in = _td_rec(_TD_F12_IN, [1, _TD_DIM, 1, _TD_DIM])
     if n_inputs == 2:
         words = [0] + rec_out + rec_in + rec_in + [0]
-    else:                               # n_inputs >= 3
-        words = [0, 0] + rec_in * 3 + [0, 0]
+    else:
+        words = [0, 0] + rec_in * n_inputs + [0, 0]
     return struct.pack(f"<{len(words)}Q", *words)
 
 
@@ -863,11 +865,12 @@ def _patch_regcmd(full, rc_offset, n_adds, C1, W, tiles, ops=None):
     st = W * 16
 
     for g in range(n_adds):
-        group = spans[g * spans_per_add : (g + 1) * spans_per_add]
+        group = spans[g::n_adds]
         op_name = (ops[g] if ops and g < len(ops) else None) or "Add"
-        ew_cfg_val = rc_template_gen._ew_cfg(
-            rc_template_gen.EW_OP_MUL if op_name == "Mul" else rc_template_gen.EW_OP_ADD
-        )
+        op_id = rc_template_gen.ew_op_id(op_name)
+        ew_cfg_val = rc_template_gen._ew_cfg(op_id)
+        out_res = rc_template_gen._DPU_OUT_RES.get(op_id, 0x00010001)
+        bn_mul = rc_template_gen._RDMA_BN_MUL.get(op_id, 0x00017849)
         for tile_idx, (i, c) in enumerate(group):
             tidx = min(tile_idx, n_tiles - 1)
             C1_tile, surf_offset = tiles[tidx]
@@ -875,6 +878,8 @@ def _patch_regcmd(full, rc_offset, n_adds, C1, W, tiles, ops=None):
             base = surf_offset * st
             _rc_patch_block(w, i, c, W, ch, base, st, op_name)
             _rc_set(w, i, c, _DPU, 0x4070, ew_cfg_val)
+            _rc_set(w, i, c, _DPU, 0x4084, out_res)
+            _rc_set(w, i, c, _RDMA, 0x5044, bn_mul)
 
     for idx, val in enumerate(w):
         struct.pack_into("<Q", full, idx * 8, val)

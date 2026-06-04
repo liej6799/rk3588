@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""rknn_add_gen.py - self-contained generator for fp16 element-wise Add/Mul .rknn models.
+"""rknn_add_gen.py - self-contained generator for fp16 element-wise Add/Sub/Mul/Div .rknn models.
 
 Generates a runnable .rknn for ANY shape (rows x cols, N=rows*cols <= 50,231,944)
-WITHOUT the rknn-toolkit2 compiler or any external template files, by embedding the
-known-good FlatBuffer+regcmd bodies for 2/3/4-input Add and patching tensor shapes,
-memory plans and register-command streams in-place. Reverse-engineered for RKNPU2
-v2.3.2 / rk3588.
+WITHOUT the rknn-toolkit2 compiler or any external template files, by building the
+FlatBuffer+regcmd body from scratch using rc_template_gen and rknn_flatbuf.
+Reverse-engineered for RKNPU2 v2.3.2 / rk3588.
 
 For 5+ inputs, falls back to make_template() which builds the ONNX and compiles it
 once with the on-device toolkit, caching the result.
 
 The work is laid into C1=ceil(N/8176) NC1HWC2 channel surfaces (W=ceil(N/C1) each).
-When C1 <= 1024, a single add tile covers all surfaces (CHANNEL = C1*8-1, fits in the
+When C1 <= 1024, a single tile covers all surfaces (CHANNEL = C1*8-1, fits in the
 13-bit hardware field). When C1 > 1024, the template regcmd blocks are split into
 multiple tiles, each covering up to 1024 surfaces with byte-offset base addresses.
-Ceiling: 6 tiles x 1024 surfaces x 8176 width = 50,231,944 elements per Add operation.
+Ceiling: 6 tiles x 1024 surfaces x 8176 width = 50,231,944 elements per operation.
 
 `--allow-toolkit` falls back to the on-device rknn-toolkit2 build for N > MAX_N.
 
@@ -22,12 +21,14 @@ Usage
 -----
   # 2-input (default): z = x + y
   rknn_add_gen.py --rows 4096 --cols 4096 -o big.rknn --verify
-  # 3-input: d = a + b + c
-  rknn_add_gen.py --inputs 3 --rows 4096 --cols 4096 -o big3.rknn --verify
-  # 4-input: e = a + b + c + d
-  rknn_add_gen.py --inputs 4 --rows 4096 --cols 4096 -o big4.rknn --verify
   # element-wise Mul: z = x * y
   rknn_add_gen.py --op Mul --rows 10 --cols 10 -o mul.rknn --verify
+  # element-wise Div: z = x / y
+  rknn_add_gen.py --op Div --rows 10 --cols 10 -o div.rknn --verify
+  # 3-input mixed: d = (a * b) - c
+  rknn_add_gen.py --inputs 3 --ops Mul,Sub --rows 10 --cols 10 -o mix.rknn --verify
+  # 4-input: e = ((a / b) + c) * d
+  rknn_add_gen.py --inputs 4 --ops Div,Add,Mul --rows 10 --cols 10 -o mix4.rknn
 """
 import argparse, json, math, struct, subprocess, sys
 from pathlib import Path
@@ -168,7 +169,7 @@ def _patch_block(w, i, c, W, ch, base, st, op="Add"):
     for reg in (0x4030, 0x405c):
         _set(w, i, c, DPU, reg, W - 1)
     _set(w, i, c, RDMA, 0x500c, W - 1)
-    ch_val = ((W - 1) << 16 | ch) if op == "Mul" else (ch << 16 | ch)
+    ch_val = ((W - 1) << 16 | ch) if op != "Add" else (ch << 16 | ch)
     _set(w, i, c, DPU, 0x403c, ch_val)
     _set(w, i, c, DPU, 0x4058, ch)
     _set(w, i, c, RDMA, 0x5014, ch)
@@ -182,32 +183,38 @@ def _patch_block(w, i, c, W, ch, base, st, op="Add"):
     _set(w, i, c, RDMA, 0x5040, st)
     _set(w, i, c, RDMA, 0x504c, 0)
     _set(w, i, c, RDMA, 0x506c, 0)
+    op_id = rc_template_gen.ew_op_id(op)
+    _set(w, i, c, DPU, 0x4070, rc_template_gen._ew_cfg(op_id))
+    _set(w, i, c, DPU, 0x4084, rc_template_gen._DPU_OUT_RES.get(op_id, 0x00010001))
+    _set(w, i, c, RDMA, 0x5044, rc_template_gen._RDMA_BN_MUL.get(op_id, 0x00017849))
 
 
 def _patch_ew_ops(body, ops):
-    n_adds = len(ops)
     if all(o == "Add" for o in ops):
         return
-    total_groups = ADD_GROUPS.get(n_adds + 1, n_adds)
-    if total_groups == 0:
-        total_groups = n_adds
+    n_adds = len(ops)
+    total_groups = ADD_GROUPS.get(n_adds + 1, n_adds) or n_adds
     spans, w = regcmd_spans(body)
     spans_per_group = len(spans) // total_groups if total_groups > 0 else len(spans)
     for g in range(n_adds):
         op = ops[g]
-        ew_cfg_val = rc_template_gen._ew_cfg(
-            rc_template_gen.EW_OP_MUL if op == "Mul" else rc_template_gen.EW_OP_ADD
-        )
-        group = spans[g * spans_per_group : (g + 1) * spans_per_group]
+        if op == "Add":
+            continue
+        op_id = rc_template_gen.ew_op_id(op)
+        ew_cfg_val = rc_template_gen._ew_cfg(op_id)
+        out_res = rc_template_gen._DPU_OUT_RES.get(op_id, 0x00010001)
+        bn_mul = rc_template_gen._RDMA_BN_MUL.get(op_id, 0x00017849)
+        group = spans[g::total_groups]
         for start, count in group:
             _set(w, start, count, DPU, 0x4070, ew_cfg_val)
-            if op == "Mul":
-                ch_val = _get_reg(w, start, count, DPU, 0x403c)
-                if ch_val is not None:
-                    ch_lower = ch_val & 0xFFFF
-                    w_val = _get_reg(w, start, count, DPU, 0x4030)
-                    w_minus_1 = w_val if w_val is not None else ch_lower
-                    _set(w, start, count, DPU, 0x403c, (w_minus_1 << 16) | ch_lower)
+            _set(w, start, count, DPU, 0x4084, out_res)
+            _set(w, start, count, RDMA, 0x5044, bn_mul)
+            ch_val = _get_reg(w, start, count, DPU, 0x403c)
+            if ch_val is not None:
+                ch_lower = ch_val & 0xFFFF
+                w_val = _get_reg(w, start, count, DPU, 0x4030)
+                w_minus_1 = w_val if w_val is not None else ch_lower
+                _set(w, start, count, DPU, 0x403c, (w_minus_1 << 16) | ch_lower)
     for idx, val in enumerate(w):
         struct.pack_into("<Q", body, idx * 8, val)
 
@@ -299,7 +306,7 @@ def make_tiles(body, N, n_inputs, ops=None):
         raise SystemExit(f"need {n_tiles} tiles but only {spans_per_add} blocks per Add "
                          f"(max N = {MAX_N:,}; use --allow-toolkit for larger models)")
     for g in range(n_adds):
-        group = spans[g * spans_per_add : (g + 1) * spans_per_add]
+        group = spans[g::n_adds]
         op = ops[g] if g < len(ops) else "Add"
         for tile_idx, (i, c) in enumerate(group):
             tidx = min(tile_idx, n_tiles - 1)
@@ -504,10 +511,10 @@ def main():
     ap.add_argument("--cols", type=int, required=True)
     ap.add_argument("--inputs", type=int, default=2, choices=range(2, 9), metavar="2..8",
                     help="number of inputs: 2 for z=x+y, 3 for d=a+b+c (default: 2)")
-    ap.add_argument("--op", choices=["Add", "Mul"], default=None,
-                    help="element-wise operation applied uniformly (Add or Mul)")
+    ap.add_argument("--op", choices=["Add", "Sub", "Mul", "Div"], default=None,
+                    help="element-wise operation applied uniformly")
     ap.add_argument("--ops", type=str, default=None,
-                    help="comma-separated per-op list, e.g. Mul,Add for d=(a*b)+c")
+                    help="comma-separated per-op list, e.g. Mul,Add,Sub")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--emit-parts", action="store_true")
     ap.add_argument("--verify", action="store_true")
@@ -515,11 +522,12 @@ def main():
                     help="for N>%d, fall back to the on-device toolkit build" % MAX_N)
     a = ap.parse_args()
     n_adds = a.inputs - 1
+    valid_ops = {"Add", "Sub", "Mul", "Div"}
     if a.ops:
         ops = [o.strip() for o in a.ops.split(",")]
-        bad = [o for o in ops if o not in ("Add", "Mul")]
+        bad = [o for o in ops if o not in valid_ops]
         if bad:
-            raise SystemExit(f"unknown ops: {bad} (valid: Add, Mul)")
+            raise SystemExit(f"unknown ops: {bad} (valid: {sorted(valid_ops)})")
         if len(ops) != n_adds:
             raise SystemExit(f"expected {n_adds} ops for {a.inputs} inputs, got {len(ops)}")
     elif a.op:
