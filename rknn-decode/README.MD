@@ -325,9 +325,9 @@ single toolkit-free `.rknn`:
 ```
 
 (Broadcasts are host-side numpy; the arithmetic — multiply + accumulate — runs on the NPU
-via toolkit-free element-wise tiles. The toolkit-free chain synth reliably loads for ≤3
-inputs / ≤2 ops, i.e. the MULACC case matmul needs; longer chains need the reference-body
-path. No compiler, no caching.) But matmul is **not** an
+via toolkit-free element-wise tiles. The chain synth handles **2–7 inputs / 1–6 mixed ops**
+in one `.rknn` (verified on the NPU); 8+ inputs need an extracted regcmd template. No
+compiler, no caching.) But matmul is **not** an
 element-wise add, so `uops_to_rknn` deliberately rejects it: the NPU matmul/conv engine
 (the `CNA`/`CORE` blocks) is a separate command stream that the toolkit-free synthesizer
 does not emit. So matmul is reproducible/verifiable at the UOp level, but not yet runnable

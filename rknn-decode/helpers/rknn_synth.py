@@ -165,11 +165,11 @@ def chain_to_rknn(ops, N: int, rows: int | None = None, cols: int | None = None)
   bad = [o for o in ops if o not in _CHAIN_OPS]
   if bad:
     raise ValueError(f"unsupported chain ops {bad}; allowed: {sorted(_CHAIN_OPS)}")
-  if not 1 <= len(ops) <= 2:
-    # the pure-FlatBuffers synth reliably loads for <=3 inputs (<=2 ops, e.g. MULACC a*b+c);
-    # longer chains need the reference-body path (a one-time toolkit compile) -- out of scope here.
+  if not 1 <= len(ops) <= 6:
+    # the pure-FlatBuffers synth loads for 2..7 inputs (1..6 ops); 8+ inputs need an
+    # extracted regcmd template the rc generator doesn't cover.
     raise NotImplementedError(
-      f"toolkit-free chains support 1..2 ops (2..3 inputs); got {len(ops)} ops")
+      f"toolkit-free chains support 1..6 ops (2..7 inputs); got {len(ops)} ops")
   n_inputs = len(ops) + 1
   if rows is None or cols is None:
     s = math.isqrt(N)

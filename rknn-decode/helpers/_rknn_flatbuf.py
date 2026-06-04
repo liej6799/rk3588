@@ -748,6 +748,7 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
     b.PrependUOffsetTRelativeSlot(13, root_f13, 0)
     b.PrependUOffsetTRelativeSlot(12, root_f12, 0)
     b.PrependUOffsetTRelativeSlot(11, root_ev11, 0)
+    b.PrependUint8Slot(10, 2, 0)
     b.PrependUOffsetTRelativeSlot(9, s_framework, 0)
     b.PrependUOffsetTRelativeSlot(8, s_platform, 0)
     b.PrependUOffsetTRelativeSlot(7, s_toolkit, 0)
@@ -756,7 +757,6 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None):
     b.PrependUOffsetTRelativeSlot(2, sgvec, 0)
     b.PrependUOffsetTRelativeSlot(1, s_target, 0)
     b.PrependUint32Slot(0, 6, 0)
-    b.PrependUint8Slot(10, 2, 0)
     root = b.EndObject()
 
     b.Finish(root, b"RKNN")
@@ -853,7 +853,8 @@ def _taskdesc(n_inputs):
     if n_inputs == 2:
         words = [0] + rec_out + rec_in + rec_in + [0]
     else:
-        words = [0, 0] + rec_in * n_inputs + [0, 0]
+        leading_zeros = n_inputs // 3 + 1
+        words = [0] * leading_zeros + rec_in * 3 + [0]
     return struct.pack(f"<{len(words)}Q", *words)
 
 

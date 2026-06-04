@@ -233,7 +233,8 @@ def _build_trailing(n):
     ng = max(0, n - 2)
     if ng == 0:
         return [0] * 6
-    w = [0] * 7
+    lead = 6 if n % 6 == 2 else 7
+    w = [0] * lead
     w += [0x0000001000000000, 0x000000000000000a, 0x000000000000000a]
     if ng > 1:
         w += [0] * 5
@@ -242,7 +243,10 @@ def _build_trailing(n):
               0x0000000000000001, 0x000000000000000a]
         if k < ng - 1:
             w += [0] * 3
-    w += [0] * max(0, 5 - 2 * ng)
+    trail = max(0, 5 - 2 * ng)
+    if ng == 3:
+        trail = 1
+    w += [0] * trail
     return w
 
 

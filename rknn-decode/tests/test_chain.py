@@ -21,7 +21,7 @@ def test_chain_validation():
   with pytest.raises(ValueError):
     run_chain_on_npu(["Mul", "Add"], [np.zeros(N, np.float16)] * 2)   # needs 3 inputs
   with pytest.raises(NotImplementedError):
-    chain_to_rknn(["Mul", "Add", "Sub"], N)               # >2 ops not toolkit-free here
+    chain_to_rknn(["Mul"] * 7, N)                         # 8 inputs not supported (no rc template)
 
 def test_mulacc_chain_decodes_mixed_tiles():
   d = decode_rknn(chain_to_rknn(["Mul", "Add"], N, 4, 4))   # a*b + c
@@ -33,12 +33,24 @@ def test_mulacc_chain_decodes_mixed_tiles():
   mul_cfg, add_cfg = sorted(cfgs)
   assert (mul_cfg & 0xF) == 0x4 and (add_cfg & 0xF) == 0x0  # ...c4 (mul) vs ...c0 (add)
 
-@pytest.mark.parametrize("ops,fn", [
-  (["Mul", "Add"], lambda v: v[0] * v[1] + v[2]),          # MULACC (mixed mul+add in one rknn)
-  (["Add", "Mul"], lambda v: (v[0] + v[1]) * v[2]),        # mixed add+mul
-  (["Mul", "Mul"], lambda v: v[0] * v[1] * v[2]),
+import operator
+_OP = {"Add": operator.add, "Sub": operator.sub, "Mul": operator.mul}
+
+def _expected(ops, ins):
+  acc = ins[0].astype(np.float32)
+  for op, x in zip(ops, ins[1:]):
+    acc = _OP[op](acc, x.astype(np.float32))             # left-associated chain
+  return acc
+
+@pytest.mark.parametrize("ops", [
+  ["Mul", "Add"],                # 3 inputs: MULACC a*b+c (mixed mul+add in one rknn)
+  ["Add", "Mul"],                # 3 inputs: mixed add+mul
+  ["Mul", "Add", "Sub"],         # 4 inputs, mixed
+  ["Mul", "Add", "Mul", "Add"],  # 5 inputs, mixed
+  ["Add", "Add", "Add", "Add", "Add"],   # 6 inputs (chain)
+  ["Mul", "Add"] * 3,            # 7 inputs, mixed
 ])
-def test_chain_runs_on_npu(ops, fn):
+def test_chain_runs_on_npu(ops):
   pytest.importorskip("rknn")
   rng = np.random.default_rng(1)
   ins = [rng.integers(0, 4, N).astype(np.float16) for _ in range(len(ops) + 1)]
@@ -46,5 +58,4 @@ def test_chain_runs_on_npu(ops, fn):
     out = run_chain_on_npu(ops, ins)
   except RuntimeError as e:
     pytest.skip(f"NPU runtime unavailable: {e}")
-  exp = fn([x.astype(np.float32) for x in ins])
-  np.testing.assert_allclose(np.asarray(out).reshape(-1)[:N], exp)
+  np.testing.assert_allclose(np.asarray(out).reshape(-1)[:N], _expected(ops, ins))
