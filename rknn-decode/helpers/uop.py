@@ -22,7 +22,7 @@ class Ops(Enum):
   # memory
   LOAD = auto(); STORE = auto()
   # alu
-  ADD = auto(); SUB = auto(); MUL = auto(); SHL = auto(); MAX = auto(); CMPLT = auto()
+  ADD = auto(); SUB = auto(); MUL = auto(); SHL = auto(); MAX = auto(); CMPLT = auto(); MULACC = auto()
 
 class AxisType(Enum):
   GLOBAL = auto(); LOCAL = auto(); LOOP = auto(); REDUCE = auto(); UPCAST = auto(); UNROLL = auto()

@@ -72,7 +72,8 @@ def analyze_elementwise(uops):
     pieces.append((off, val.dtype.count))               # vec store covers `count` offsets
     alu = val.src[0] if val.op is Ops.STACK else val     # peel STACK -> one lane's op
     if alu.op not in (Ops.ADD, Ops.MUL) or len(alu.src) != 2:
-      raise ValueError("only a 2-operand element-wise ADD or MUL (z = a+b / a*b) is supported")
+      raise ValueError("only a 2-operand element-wise ADD or MUL (z = a+b / a*b) is supported; "
+                       "a reduction (e.g. matmul: a MULACC/sum of products) is not")
     ops.add(alu.op)
     for operand in alu.src:
       in_params.add(_operand_param(operand))

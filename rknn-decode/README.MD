@@ -300,8 +300,13 @@ command is one tiled op regardless of how the UOps are shaped.
 
 **Reductions / matmul (`matmul_ops`).** The UOp layer also handles `Ops.REDUCE`: a matmul
 `out[i,j] = Σ_k a[i,k]·b[k,j]` (three loops, one of them a `REDUCE`) builds, and
-`fully_unroll` expands the contraction into an explicit sum-of-products — verified against
-numpy by the pure-Python interpreter (`tests/test_matmul.py`). But matmul is **not** an
+`fully_unroll` expands the contraction into a **fused multiply-accumulate** chain —
+`MUL` to seed each output's sum then `MULACC` (FMA), exactly like tinygrad's `r_8_8_8`
+kernel (`UNROLL axis=0`). For 8×8 this matches tinygrad's op counts (64 `STORE`, 64 `MUL`,
+448 `MULACC`, 0 `RANGE`); CSE (hash-consing) dedups the shared `a[i,k]`/`b[k,j]` loads to
+128 (tinygrad further vec4-groups the contiguous `a` loads to 80, and uses a
+scheduler-specific op order). Verified against numpy by the interpreter
+(`tests/test_matmul.py`). But matmul is **not** an
 element-wise add, so `uops_to_rknn` deliberately rejects it: the NPU matmul/conv engine
 (the `CNA`/`CORE` blocks) is a separate command stream that the toolkit-free synthesizer
 does not emit. So matmul is reproducible/verifiable at the UOp level, but not yet runnable

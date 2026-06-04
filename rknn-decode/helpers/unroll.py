@@ -25,12 +25,39 @@ def _expand_reduce(u: UOp) -> UOp:
       for combo in itertools.product(*[range(b) for b in bounds]):
         sub = {r: UOp.const(dtypes.int, v) for r, v in zip(rngs, combo)}
         terms.append(go(src.substitute(sub)))           # expand nested reduces too
+      # ADD-reduce of products fuses into MULACC (FMA), like tinygrad: acc=MUL(x0,y0),
+      # then acc=MULACC(xk, yk, acc). Other reduces use a plain op-fold chain.
       acc = terms[0]
-      for t in terms[1:]:
-        acc = UOp(op, acc.dtype, (acc, t))
+      if op is Ops.ADD and all(t.op is Ops.MUL and len(t.src) == 2 for t in terms):
+        for t in terms[1:]:
+          acc = UOp(Ops.MULACC, acc.dtype, (t.src[0], t.src[1], acc))
+      else:
+        for t in terms[1:]:
+          acc = UOp(op, acc.dtype, (acc, t))
       return acc
     return x._rebuild(tuple(go(s) for s in x.src))
   return go(u)
+
+
+def _cse(sink: UOp) -> UOp:
+  """Common-subexpression elimination (hash-consing): merge structurally identical nodes,
+  so a value computed in many iterations (e.g. a[i,k]/b[k,j] reused across a matmul's
+  outputs) becomes one shared UOp instead of many copies -- as in tinygrad's graph."""
+  canon, table = {}, {}
+  def go(u: UOp) -> UOp:
+    if id(u) in canon: return canon[id(u)]
+    src = tuple(go(s) for s in u.src)
+    try:
+      key = (u.op, repr(u.dtype), u.arg, tuple(id(s) for s in src))
+    except TypeError:
+      key = None                                       # unhashable arg -> don't merge
+    c = table.get(key) if key is not None else None
+    if c is None:
+      c = u._rebuild(src)
+      if key is not None: table[key] = c
+    canon[id(u)] = c
+    return c
+  return go(sink)
 
 
 def _scalar_unroll(uops: list[UOp]) -> list[UOp]:
@@ -46,7 +73,7 @@ def _scalar_unroll(uops: list[UOp]) -> list[UOp]:
   combos = list(itertools.product(*per_range)) if per_range else [()]
   new_stores = [_expand_reduce(st.substitute(dict(combo))).simplify()
                 for combo in combos for st in stores]
-  return list(UOp.sink(*new_stores, arg=sink.arg).toposort())
+  return list(_cse(UOp.sink(*new_stores, arg=sink.arg)).toposort())  # dedup shared loads/consts
 
 
 def _elementwise_layout(flat: list[UOp]):

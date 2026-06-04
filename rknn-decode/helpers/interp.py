@@ -30,6 +30,9 @@ def run_uops(uops: list, buffers: dict[int, list]) -> dict[int, list]:
       return buf[off] if n == 1 else [buf[off + i] for i in range(n)]
     if u.op is Ops.GEP: return ev(u.src[0])[u.arg[0]]          # extract one lane of a vector
     if u.op is Ops.STACK: return [ev(s) for s in u.src]         # pack lanes into a vector
+    if u.op is Ops.MULACC:                                      # fused multiply-accumulate: a*b + c
+      a, b, c = (ev(s) for s in u.src)
+      return a * b + c
     if u.op in _ALU: return _ALU[u.op](*[ev(s) for s in u.src])
     raise NotImplementedError(f"run_uops: unsupported op {u.op}")
   for st in (u for u in uops if u.op is Ops.STORE):

@@ -24,13 +24,17 @@ def test_build_has_reduce():
   assert sum(u.op is Ops.REDUCE for u in uops) == 1
   assert sum(u.op is Ops.STORE for u in uops) == 1
 
-def test_unroll_expands_reduce():
+def test_unroll_expands_reduce_to_mulacc():
+  # matches tinygrad's r_8_8_8 (UNROLL axis=0): the reduce fuses into MUL + MULACC (FMA)
   unr = fully_unroll(make_matmul_uops(8))
   assert sum(u.op is Ops.RANGE for u in unr) == 0
   assert sum(u.op is Ops.REDUCE for u in unr) == 0        # the contraction is expanded out
   assert sum(u.op is Ops.STORE for u in unr) == 64        # 8x8 outputs
-  assert sum(u.op is Ops.MUL for u in unr) == 64 * 8      # 8 products per output
-  assert sum(u.op is Ops.ADD for u in unr) == 64 * 7      # summed with a 7-deep add chain
+  assert sum(u.op is Ops.MUL for u in unr) == 64          # one MUL seeds each output's sum
+  assert sum(u.op is Ops.MULACC for u in unr) == 64 * 7   # then 7 fused multiply-accumulates
+  assert sum(u.op is Ops.ADD for u in unr) == 0
+  # CSE dedups the shared operands: a[i,k] and b[k,j] each load once (64 + 64)
+  assert sum(u.op is Ops.LOAD for u in unr) == 128
 
 @pytest.mark.parametrize("n", [2, 4, 8])
 def test_interp_matches_numpy_matmul(n):
