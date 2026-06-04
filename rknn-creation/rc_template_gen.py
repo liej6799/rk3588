@@ -1,6 +1,6 @@
 """Algorithmic regcmd template generator for chained element-wise RKNN models.
 
-Each supported RC template (n_inputs = 2..16) is:
+Each supported RC template (n_inputs = 2..64) is:
 
     [OFF[n] zero bytes]                      alignment lead
     PREFIX[n] words                          header + cascade + chains + descriptors
@@ -14,7 +14,7 @@ fields (those _rc_patch_block overwrites at build time) are stored as 0.
 """
 import struct
 
-MAX_INPUTS = 16
+MAX_INPUTS = 64
 
 _DPU, _RDMA, _PC = 0x1001, 0x2001, 0x0101
 

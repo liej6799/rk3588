@@ -1,6 +1,6 @@
 """Build RKNN FlatBuffer bodies for fp16 element-wise Add/Sub/Mul/Div.
 
-build_body() is the toolkit-free production path for 2..16 inputs.  It builds the
+build_body() is the toolkit-free production path for 2..64 inputs.  It builds the
 FlatBuffer metadata, register-command stream, and task descriptor data from
 decoded formulas/templates.  build_body_scratch() keeps the old reference-body
 splice path for reverse-engineering comparisons only.
@@ -19,7 +19,7 @@ MAX_C1_PER_TILE = (MAX_CH + 1) // 8
 BLOCKS_PER_ADD = 6
 MAX_TILES = BLOCKS_PER_ADD
 HEADER_SIZE = 0x40
-MAX_INPUTS = 16
+MAX_INPUTS = 64
 SUPPORTED_INPUTS = range(2, MAX_INPUTS + 1)
 
 _DPU = 0x1001
@@ -339,8 +339,26 @@ def tile_split(C1):
 def _io(n):
     if n == 2:
         return ["x", "y"], "z"
+    names = _io_names(n + 1)
+    return names[:n], names[n]
+
+
+def _io_names(count):
+    # First 26 names are a..z (keeps byte-exact parity with toolkit reference
+    # bodies for n<=25). Beyond that, spreadsheet-style names aa, ab, ... so the
+    # input/output count is effectively unbounded. None collide with the
+    # intermediate "t<k>-rs" tensors (those always start with 't' + digits).
     L = "abcdefghijklmnopqrstuvwxyz"
-    return list(L[:n]), L[n]
+    out = []
+    i = 0
+    while len(out) < count:
+        if i < 26:
+            out.append(L[i])
+        else:
+            j = i - 26
+            out.append(L[j // 26] + L[j % 26])
+        i += 1
+    return out
 
 
 def _mem(n):
@@ -846,6 +864,14 @@ def _taskdesc(n_inputs):
         words = [0] + rec_out + rec_in + rec_in + [0]
     else:
         leading_zeros = n_inputs // 3 + 1
+        # Taskdesc lengths of 288 + 64*k bytes (leading_zeros 11, 19, 27, ...
+        # with the 3 reshape records + bracket zeros) are rejected by the
+        # runtime's ModelBuffer verifier; every neighbouring length loads. The
+        # records are cosmetic/never-patched, so nudge the zero-pad off any bad
+        # length. Affects n_inputs in {30,31,32}, {54,55,56}, ... ; n<=25 is
+        # unaffected (leading_zeros < 11 there).
+        if leading_zeros >= 11 and (leading_zeros - 11) % 8 == 0:
+            leading_zeros += 1
         words = [0] * leading_zeros + rec_in * 3 + [0]
     return struct.pack(f"<{len(words)}Q", *words)
 
