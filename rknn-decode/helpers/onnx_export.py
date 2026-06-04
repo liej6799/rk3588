@@ -58,6 +58,10 @@ def uops_to_onnx(uops: list, name: str = "kernel"):
       out = newname("gep"); nodes.append(helper.make_node("Gather", [emit(u.src[0]), iname], [out], axis=0))
     elif u.op is Ops.STACK:                                 # pack lanes back into a vector
       out = newname("stk"); nodes.append(helper.make_node("Concat", [emit(s) for s in u.src], [out], axis=0))
+    elif u.op is Ops.MULACC:                               # FMA a*b+c -> Mul then Add (no ONNX FMA)
+      x, y, z = (emit(s) for s in u.src)
+      t = newname("mul"); nodes.append(helper.make_node("Mul", [x, y], [t]))
+      out = newname("acc"); nodes.append(helper.make_node("Add", [t, z], [out]))
     elif u.op in _ALU_ONNX:
       out = newname("alu"); nodes.append(helper.make_node(_ALU_ONNX[u.op], [emit(s) for s in u.src], [out]))
     elif u.op is Ops.CONST:
