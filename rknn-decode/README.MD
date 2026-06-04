@@ -315,13 +315,26 @@ element-wise tile program (8×8 → ~1391 command blocks: 553 `EW_BINARY` + resh
 concat) and the NPU result equals `a @ b`:
 
 ```sh
-.venv/bin/python3 -m matmul_ops.run            # 8x8 UOps -> ONNX -> RKNN -> NPU == numpy
+.venv/bin/python3 -m matmul_ops.run            # compile once (cached), then recreate+run
+```
+
+The slow part is the **toolkit compile** (~30s for 8×8 → ~1391 tiles), not the run. So
+`matmul_ops.run` compiles **once** and caches the `.rknn`; every run after that is
+toolkit-free: it *recreates* the `.rknn` from its decoded form (`recreate_rknn`, ~0.3s,
+byte-identical) and runs it on the NPU (~0.1s). Only the first (cache-miss) call imports
+the compiler at all:
+
+```
+[compile]  toolkit (one-time)   31.72s   (first run only)
+[compile]  cache hit             0.00s   (every run after)
+[recreate] toolkit-free          0.33s
+[run]      NPU                    0.09s   (== numpy matmul)
 ```
 
 This is correct but not efficient — we feed the toolkit the fully-unrolled scalar matmul,
 not an ONNX `Gemm`, so it never recognizes the matmul and emits hundreds of element-wise
 tiles. It still can't be synthesized *toolkit-free* (no matmul/conv command-stream emitter);
-`uops_to_rknn` rejects it. But matmul is **not** an
+`uops_to_rknn` rejects it. The compile is one-time; recreate-and-run needs no compiler. But matmul is **not** an
 element-wise add, so `uops_to_rknn` deliberately rejects it: the NPU matmul/conv engine
 (the `CNA`/`CORE` blocks) is a separate command stream that the toolkit-free synthesizer
 does not emit. So matmul is reproducible/verifiable at the UOp level, but not yet runnable
