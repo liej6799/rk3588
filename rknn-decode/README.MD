@@ -17,7 +17,7 @@ rknn-decode/
 │   ├── rknn_run.py     #   run_rknn(model, inputs) / print_rknn_graph(model): run / print a .rknn on the NPU
 │   ├── rknn_decode.py  #   decode_rknn(model): disassemble a .rknn (FlatBuffer graph + NPU command queue)
 │   ├── rknn_encode.py  #   recreate_rknn(model): rebuild a .rknn from its decoded form (byte-exact)
-│   ├── rknn_synth.py   #   uops_to_rknn(uops): synthesize a .rknn from UOps (no onnx, no toolkit)
+│   ├── rknn_synth.py   #   uops_to_rknn / chain_to_rknn: synthesize a .rknn from UOps / op-chains (no onnx, no toolkit)
 │   ├── _rknn_flatbuf.py#   vendored: build the FlatBuffer body + container from scratch
 │   ├── _rc_template_gen.py # vendored: generate the NPU register-command stream from scratch
 │   └── viz.py          #   serve(model): host an ONNX/.rknn model in netron
@@ -57,6 +57,7 @@ rknn-decode/
 │   ├── test_add2d.py   #   2D nested-loop add (N=100): unroll -> synth -> run on NPU
 │   ├── test_mul.py     #   element-wise multiply (N=100): unroll -> synth (MUL EW op) -> NPU
 │   ├── test_upcast.py  #   fully_unroll auto-upcast == tinygrad E_25_4 (vec(4)) + interp check
+│   ├── test_chain.py   #   toolkit-free mixed-op chains (MULACC a*b+c) in one .rknn on NPU
 │   └── test_matmul.py  #   matmul (REDUCE): unroll -> interp == numpy; synth rejects it
 ├── conftest.py         # marks the project root for pytest imports
 └── README.MD
@@ -310,22 +311,23 @@ scheduler-specific op order). Verified against numpy by the interpreter
 (`tests/test_matmul.py`).
 
 A single matmul `.rknn` can't be synthesized toolkit-free (no matmul/conv command-stream
-emitter — `uops_to_rknn` rejects it). But matmul **decomposes into element-wise ops we can**:
-`A @ B` is the sum of K rank-1 terms — for each k, an element-wise multiply of the broadcast
-column `A[:,k]` and row `B[k,:]`, accumulated with element-wise adds. Each multiply/add is
-synthesized from UOps via `uops_to_rknn` (no compiler) and run on the NPU — the same
-`add_ops`/`mul_ops` synth path. So `matmul_ops.run` runs the whole matmul on the NPU with
-**zero toolkit and no caching**:
+emitter — `uops_to_rknn` rejects it). But matmul **decomposes into element-wise ops we can**.
+The synth now supports **mixed-op chains in one `.rknn`** — `chain_to_rknn(ops, N)` builds a
+body with per-op EW tiles (Add/Sub/Mul/Div), e.g. `["Mul","Add"]` is a fused
+multiply-accumulate `a*b + c` (both Mul tiles `EW_CFG …c4` and Add tiles `…c0` in one body).
+So `A @ B` runs as K **MULACC** NPU ops: for each k, `acc = A[:,k]*B[k,:] + acc`, each a
+single toolkit-free `.rknn`:
 
 ```sh
-.venv/bin/python3 -m matmul_ops.run            # 8x8 = 8 mul + 7 add toolkit-free NPU ops
-# matmul 8x8x8 = 8 mul + 7 add toolkit-free NPU ops in ~3s
+.venv/bin/python3 -m matmul_ops.run            # 8x8 = 8 MULACC toolkit-free NPU ops
+# matmul 8x8x8 = 8 MULACC toolkit-free NPU ops in ~2.6s
 # NPU == numpy matmul: True
 ```
 
-(The broadcasts are host-side numpy reshapes; the arithmetic — the K multiplies and the
-accumulation — runs on the NPU via toolkit-free element-wise tiles. The MULACC/ONNX path
-still exists for reference, but the run no longer invokes the compiler.) But matmul is **not** an
+(Broadcasts are host-side numpy; the arithmetic — multiply + accumulate — runs on the NPU
+via toolkit-free element-wise tiles. The toolkit-free chain synth reliably loads for ≤3
+inputs / ≤2 ops, i.e. the MULACC case matmul needs; longer chains need the reference-body
+path. No compiler, no caching.) But matmul is **not** an
 element-wise add, so `uops_to_rknn` deliberately rejects it: the NPU matmul/conv engine
 (the `CNA`/`CORE` blocks) is a separate command stream that the toolkit-free synthesizer
 does not emit. So matmul is reproducible/verifiable at the UOp level, but not yet runnable

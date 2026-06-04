@@ -1,10 +1,10 @@
 """matmul_ops example: run an n x n matmul on the NPU fully toolkit-free.
 
 Matmul can't be synthesized as a single .rknn, but it decomposes into element-wise ops we
-CAN synthesize toolkit-free. out = A @ B is the sum of K rank-1 terms: for each k, an
-element-wise multiply of the broadcast column A[:,k] and row B[k,:], accumulated with
-element-wise adds. Every multiply/add is synthesized from UOps via uops_to_rknn (no
-compiler) and run on the NPU -- exactly the add_ops/mul_ops synth path. Result == numpy.
+CAN synthesize toolkit-free. out = A @ B is the sum of K rank-1 terms: for each k, the
+broadcast column A[:,k] times row B[k,:], accumulated. Each step is ONE fused multiply-
+accumulate (MULACC) .rknn -- a mixed Mul+Add op-chain `col*row + acc` -- synthesized
+toolkit-free (no compiler) and run on the NPU. So an n x n matmul = K MULACC NPU ops.
 
     .venv/bin/python3 -m matmul_ops.run            # 8x8
     .venv/bin/python3 -m matmul_ops.run 16         # n x n
@@ -13,21 +13,18 @@ import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # make project root importable
 
 import numpy as np
-from helpers.rknn_synth import run_uops_on_npu
-from mul_ops.uops import make_mul_uops
-from add_ops.uops import make_add_uops
+from helpers.rknn_synth import run_chain_on_npu
 
 def matmul_npu(A, B, M, K, N):
-  """out[i,j] = sum_k A[i,k]*B[k,j] (A: M*K, B: K*N, flat fp16), via K element-wise muls
-  + adds on the NPU, each synthesized toolkit-free. Returns the M*N output (fp16)."""
+  """out[i,j] = sum_k A[i,k]*B[k,j] (A: M*K, B: K*N, flat fp16), via K fused multiply-
+  accumulate (MULACC) NPU ops. Each step is ONE toolkit-free .rknn doing col*row + acc
+  (a mixed Mul+Add op-chain). Returns the M*N output (fp16)."""
   A2, B2 = A.reshape(M, K), B.reshape(K, N)
-  acc = None
+  acc = np.zeros(M * N, dtype=np.float16)
   for k in range(K):
     col = np.repeat(A2[:, k], N).astype(np.float16)         # col[i*N+j] = A[i,k]  (broadcast over j)
     row = np.tile(B2[k], M).astype(np.float16)              # row[i*N+j] = B[k,j]  (broadcast over i)
-    term = np.asarray(run_uops_on_npu(make_mul_uops(M, N), [col, row])).reshape(-1)[:M*N].astype(np.float16)
-    acc = term if acc is None else \
-        np.asarray(run_uops_on_npu(make_add_uops(M*N), [acc, term])).reshape(-1)[:M*N].astype(np.float16)
+    acc = np.asarray(run_chain_on_npu(["Mul", "Add"], [col, row, acc])).reshape(-1)[:M*N].astype(np.float16)
   return acc
 
 def main():
@@ -40,7 +37,7 @@ def main():
   out = matmul_npu(A, B, n, n, n)
   dt = time.perf_counter() - t
   ok = np.allclose(out.astype(np.float32), ref)
-  print(f"matmul {n}x{n}x{n} = {n} mul + {n-1} add toolkit-free NPU ops in {dt:.2f}s")
+  print(f"matmul {n}x{n}x{n} = {n} MULACC toolkit-free NPU ops in {dt:.2f}s")
   print(f"NPU == numpy matmul: {ok}")
   return 0 if ok else 1
 

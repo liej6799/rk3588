@@ -150,3 +150,43 @@ def run_uops_on_npu(uops, inputs, target: str = "rk3588",
   blob = uops_to_rknn(uops, rows, cols)
   out = run_rknn(blob, list(inputs), target=target)
   return out[0].reshape(-1)[:N]
+
+
+_CHAIN_OPS = {"Add", "Sub", "Mul", "Div"}
+
+def chain_to_rknn(ops, N: int, rows: int | None = None, cols: int | None = None) -> bytes:
+  """Synthesize a runnable .rknn for an element-wise op-chain (toolkit-free, MIXED ops).
+
+  `ops` is a list like ["Mul", "Add"]; the model computes the left-associated chain
+  `(((in0 ops[0] in1) ops[1] in2) ...)` over N elements, with `len(ops)+1` inputs. Each op
+  becomes its own EW tiles (Add/Sub/Mul/Div) in one body -- e.g. ["Mul","Add"] is the fused
+  multiply-accumulate `a*b + c`. No ONNX, no toolkit.
+  """
+  bad = [o for o in ops if o not in _CHAIN_OPS]
+  if bad:
+    raise ValueError(f"unsupported chain ops {bad}; allowed: {sorted(_CHAIN_OPS)}")
+  if not 1 <= len(ops) <= 2:
+    # the pure-FlatBuffers synth reliably loads for <=3 inputs (<=2 ops, e.g. MULACC a*b+c);
+    # longer chains need the reference-body path (a one-time toolkit compile) -- out of scope here.
+    raise NotImplementedError(
+      f"toolkit-free chains support 1..2 ops (2..3 inputs); got {len(ops)} ops")
+  n_inputs = len(ops) + 1
+  if rows is None or cols is None:
+    s = math.isqrt(N)
+    rows, cols = (s, s) if s * s == N else (1, N)
+  body = _fb.build_body(N, n_inputs, ops=list(ops))     # FlatBuffer + per-op regcmd tiles
+  return _fb.assemble_rknn(body, rows, cols, n_inputs)
+
+
+def run_chain_on_npu(ops, inputs, target: str = "rk3588",
+                     rows: int | None = None, cols: int | None = None):
+  """Synthesize an element-wise op-chain .rknn (toolkit-free) and run it on the NPU.
+
+  `inputs` is the list of `len(ops)+1` input arrays (fp16). Returns the N-element output.
+  """
+  from .rknn_run import run_rknn                         # lazy: keeps the build toolkit-free
+  if len(inputs) != len(ops) + 1:
+    raise ValueError(f"{len(ops)} ops need {len(ops)+1} inputs, got {len(inputs)}")
+  N = len(inputs[0])
+  blob = chain_to_rknn(ops, N, rows, cols)
+  return run_rknn(blob, list(inputs), target=target)[0].reshape(-1)[:N]

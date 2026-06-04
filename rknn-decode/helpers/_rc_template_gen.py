@@ -16,12 +16,49 @@ import struct
 
 _DPU, _RDMA, _PC = 0x1001, 0x2001, 0x0101
 
+EW_OP_ADD = 0
+EW_OP_SUB = 1
+EW_OP_MUL = 2
+EW_OP_DIV = 3
+
+_EW_CFG = {
+    EW_OP_ADD: 0x108202c0,
+    EW_OP_SUB: 0x108402c0,
+    EW_OP_MUL: 0x108003c4,
+    EW_OP_DIV: 0x108303c0,
+}
+
+_DPU_OUT_RES = {
+    EW_OP_ADD: 0x00010001,
+    EW_OP_SUB: 0x00010001,
+    EW_OP_MUL: 0x00010001,
+    EW_OP_DIV: 0x00000001,
+}
+
+_RDMA_BN_MUL = {
+    EW_OP_ADD: 0x00017849,
+    EW_OP_SUB: 0x00017849,
+    EW_OP_MUL: 0x00017849,
+    EW_OP_DIV: 0x00017841,
+}
+
+_OP_NAMES = {"Add": EW_OP_ADD, "Sub": EW_OP_SUB, "Mul": EW_OP_MUL, "Div": EW_OP_DIV}
+
+
+def ew_op_id(name):
+    return _OP_NAMES.get(name, EW_OP_ADD)
+
+
+def _ew_cfg(op):
+    return _EW_CFG.get(op, _EW_CFG[EW_OP_ADD])
+
 
 def _w(tgt, reg, val):
     return (tgt << 48) | ((val & 0xFFFFFFFF) << 16) | reg
 
 
-CANON = [
+def _canon(op=EW_OP_ADD):
+    return [
     (0x1001, 0x4004, 0x0000000e, False),
     (0x2001, 0x5004, 0x0000000e, False),
     (0x1001, 0x400c, 0x000001e5, False),
@@ -45,12 +82,12 @@ CANON = [
     (0x1001, 0x4064, 0x00000000, False),
     (0x1001, 0x4068, 0x00000000, False),
     (0x1001, 0x406c, 0x00000000, False),
-    (0x1001, 0x4070, 0x108202c0, False),
+    (0x1001, 0x4070, _ew_cfg(op), False),
     (0x1001, 0x4074, 0x00000000, False),
     (0x1001, 0x4078, 0x00000001, False),
     (0x1001, 0x407c, 0x00000000, False),
     (0x1001, 0x4080, 0x00000000, False),
-    (0x1001, 0x4084, 0x00010001, False),
+    (0x1001, 0x4084, _DPU_OUT_RES.get(op, 0x00010001), False),
     (0x1001, 0x4088, 0x00000000, False),
     (0x1001, 0x4090, 0x00000000, False),
     (0x1001, 0x4094, 0x00000000, False),
@@ -85,7 +122,7 @@ CANON = [
     (0x2001, 0x5034, 0x40000008, False),
     (0x2001, 0x5038, 0x00000000, True),
     (0x2001, 0x5040, 0x00000000, True),
-    (0x2001, 0x5044, 0x00017849, False),
+    (0x2001, 0x5044, _RDMA_BN_MUL.get(op, 0x00017849), False),
     (0x2001, 0x5048, 0x00000000, False),
     (0x2001, 0x504c, 0x00000000, True),
     (0x2001, 0x5064, 0x00000000, False),
@@ -209,22 +246,26 @@ def _build_trailing(n):
     return w
 
 
-def _canon_words():
-    return [_w(t, r, 0 if p else v) for (t, r, v, p) in CANON]
+def _canon_words(op=EW_OP_ADD):
+    return [_w(t, r, 0 if p else v) for (t, r, v, p) in _canon(op)]
 
 
-def build_template(n_inputs):
+def build_template(n_inputs, ops=None):
     n_adds = n_inputs - 1
-    canon = _canon_words()
+    if ops is None:
+        ops = [EW_OP_ADD] * n_adds
+    elif isinstance(ops, int):
+        ops = [ops] * n_adds
+    canon_per = [_canon_words(op) for op in ops]
     words = list(PREFIX[n_inputs])
     gbi = 0
     for _tile in range(6):
         for j in range(n_adds):
             if j < n_adds - 1:
                 base = _w(_PC, 0x0010, (gbi + 1) * 0x280)
-                words += canon + [base, PC14] + GAP71
+                words += canon_per[j] + [base, PC14] + GAP71
             else:
-                words += canon + GAP69
+                words += canon_per[j] + GAP69
             gbi += 1
     words += _build_trailing(n_inputs)
     return b"\x00" * OFF[n_inputs] + struct.pack(f"<{len(words)}Q", *words)
