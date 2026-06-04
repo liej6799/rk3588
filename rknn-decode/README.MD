@@ -35,7 +35,8 @@ rknn-decode/
 │   └── pipeline.py     #   upcast UOps -> ONNX -> rknn -> NPU, decoded at each stage
 ├── matmul_ops/         # example: n x n float matmul UOps (REDUCE contraction)
 │   ├── uops.py         #   make_matmul_uops(n): out[i,j] = sum_k a[i,k]*b[k,j]
-│   └── run.py          #   matmul on the NPU as element-wise mul+add ops, toolkit-free
+│   ├── run.py          #   matmul on the NPU as MULACC ops, toolkit-free (--perf prints eval_perf)
+│   └── viz.py          #   visualize the matmul ONNX graph or the MULACC step .rknn in netron
 ├── add_ops/            # example: the 5x5 half `a + b` kernel
 │   ├── uops.py         #   load_uops(): hard-coded snapshot of the original UOps
 │   ├── run.py          #   load the uops, then fully unroll and print

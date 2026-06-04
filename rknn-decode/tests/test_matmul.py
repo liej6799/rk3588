@@ -73,6 +73,19 @@ def test_matmul_onnx_runs():
   out = sess.run(None, {"input1": A, "input2": B})[0].reshape(-1)[:64].astype(np.float32)
   np.testing.assert_allclose(out, ref)
 
+def test_viz_builds():
+  import onnx
+  from collections import Counter
+  from matmul_ops.viz import build_model, build_rknn
+  from helpers.rknn_decode import decode_rknn
+  m = build_model(2)                                       # 2x2 matmul ONNX graph
+  onnx.checker.check_model(m)
+  ops = Counter(n.op_type for n in m.graph.node)
+  assert ops["Mul"] == 8 and ops["Add"] == 4 and ops["Concat"] == 1
+  d = decode_rknn(build_rknn(8))                            # the MULACC step .rknn
+  node_ops = [n["op"] for n in d["nodes"]]
+  assert "Mul" in node_ops and "Add" in node_ops          # mixed mul+add in one model
+
 def test_matmul_on_npu_toolkit_free():
   # matmul as element-wise mul+add NPU ops, each synthesized toolkit-free (no compiler)
   pytest.importorskip("rknn")
