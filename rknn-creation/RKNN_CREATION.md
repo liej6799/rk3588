@@ -818,16 +818,25 @@ Key decodings:
 - The PC chain-address + PC14 + GAP framing is **identical** to the NPU path.
 - Working on a **uint32** basis handles even-n half-word alignment naturally
   (even-n streams carry one extra trailing 32-bit word).
-- The descriptor prefix is now generated from fixed header words, closed-form
-  address/copy-descriptor/DMA records, and a compact n=2..64 lead schedule.
+- The descriptor prefix is generated structurally: `_cpu_fixed_header()` builds
+  the constant header (length-prefixed `a_rs_i1` name + offset tables), and the
+  address/copy-descriptor/DMA records are closed-form in n.
+- The **alignment lead** is pure padding that re-aligns the reshape/copy canon to
+  a 64-byte boundary. `_cpu_lead_u32(n, rc_word_off)` computes its length (and the
+  descending offset suffix it carries) purely from the alignment math, where
+  `rc_word_off` is the RC section's u32 file offset (equivalently FB-body length
+  // 4). There is **no per-n lead/residue table** — `build_cpu_template(n,
+  rc_word_off=...)` derives the lead from the actual layout offset, and the
+  trailing descriptor absorbs the resulting length change so the total RC size
+  matches the toolkit schedule.
 - The CPU trailing descriptor is a prefix of the repeated `[1,1,1,4]` record
   stream, cut to the toolkit's total RC length schedule.
 
 The **task descriptor** is likewise generated: `_taskdesc_cpu(n)` emits the same
 8-word reshape-descriptor family as `_taskdesc` but with the `[1,4]` bool dims
 (output record dims `[1,4]`, input records `[1,1,1,4]`). For n>=3 it is a
-cyclic window keyed by the same compact CPU lead schedule; byte-exact vs the
-references n=2..64.
+cyclic window whose offset is derived from the CPU regcmd alignment-lead length;
+byte-exact vs the references n=2..64.
 
 The end-to-end on-device models (n=2..5, all-zero and all-ones vectors PASS) are
 built by `build_and_chain_scratch.py`. The **RC and taskdesc are fully generated**

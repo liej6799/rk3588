@@ -884,7 +884,7 @@ def _taskdesc(n_inputs):
 _TD_CPU_DIM = 0x04
 
 
-def _taskdesc_cpu(n_inputs):
+def _taskdesc_cpu(n_inputs, rc_word_off=0):
     if n_inputs < 2:
         raise ValueError(f"taskdesc not available for {n_inputs} inputs")
     rec_out = _td_rec(_TD_F12_OUT, [1, _TD_CPU_DIM])
@@ -892,13 +892,15 @@ def _taskdesc_cpu(n_inputs):
     if n_inputs == 2:
         words = [0] * 6 + rec_out + rec_in + rec_in + [0]
     else:
-        code = rc_template_gen._CPU_LEAD_CODES.get(n_inputs)
-        if code is None:
-            raise ValueError(f"taskdesc not available for {n_inputs} inputs")
-        if code > 0:
-            offset = (7 - code) // 2
+        # The taskdesc is a cyclic window into repeated input records; the window
+        # offset is set by the CPU regcmd alignment lead length (longer leads -
+        # which carry the offset suffix - start the window earlier). rc_word_off
+        # is the RC section's u32 file offset, the same input the lead derives from.
+        lead_len = len(rc_template_gen._cpu_lead_u32(n_inputs, rc_word_off))
+        if lead_len >= 12:
+            offset = (18 - lead_len) // 2
         else:
-            offset = 9 - ((-code) // 2)
+            offset = 9 - lead_len // 2
         total_words = 33 - offset
         stream = rec_in * ((offset + total_words + _TD_REC_WORDS - 1) // _TD_REC_WORDS)
         words = stream[offset:offset + total_words - 1] + [0]

@@ -22,12 +22,17 @@ EW_OP_ADD = 0
 EW_OP_SUB = 1
 EW_OP_MUL = 2
 EW_OP_DIV = 3
+# Pure copy/reshape mode: the NPU side of a CPU-fallback op runs the same 69
+# register block as the element-wise ops, just configured to copy rather than
+# compute. It is a regular member of the op-dispatch tables below.
+EW_OP_COPY = 4
 
 _EW_CFG = {
     EW_OP_ADD: 0x108202c0,
     EW_OP_SUB: 0x108402c0,
     EW_OP_MUL: 0x108003c4,
     EW_OP_DIV: 0x108303c0,
+    EW_OP_COPY: 0x00000383,
 }
 
 _DPU_OUT_RES = {
@@ -35,6 +40,7 @@ _DPU_OUT_RES = {
     EW_OP_SUB: 0x00010001,
     EW_OP_MUL: 0x00010001,
     EW_OP_DIV: 0x00000001,
+    EW_OP_COPY: 0x00000001,
 }
 
 _RDMA_BN_MUL = {
@@ -42,6 +48,19 @@ _RDMA_BN_MUL = {
     EW_OP_SUB: 0x00017849,
     EW_OP_MUL: 0x00017849,
     EW_OP_DIV: 0x00017841,
+    EW_OP_COPY: 0x00007801,
+}
+
+# Copy mode overrides two more cfg registers vs the element-wise ops, and bakes
+# the fixed [1,4] bool reshape geometry into the fields the element-wise path
+# leaves zero and patches per-block at build time (copy geometry is constant).
+_COPY_DPU_MODE = 0x00000000      # 0x4010 (element-wise: 0x48000002)
+_COPY_RDMA_MODE = 0x00000001     # 0x5034 (element-wise: 0x40000008)
+_COPY_SHAPE_FILL = {
+    0x4024: 0x00000040, 0x4030: 0x00000001, 0x4034: 0x00000001,
+    0x403c: 0x000f000f, 0x4058: 0x0000000f, 0x405c: 0x00010001,
+    0x40c0: 0x00000040, 0x500c: 0x00000001, 0x5010: 0x00000001,
+    0x5014: 0x0000000f,
 }
 
 _OP_NAMES = {"Add": EW_OP_ADD, "Sub": EW_OP_SUB, "Mul": EW_OP_MUL, "Div": EW_OP_DIV}
@@ -82,11 +101,12 @@ def _w(tgt, reg, val):
 
 
 def _canon(op=EW_OP_ADD):
+    copy = (op == EW_OP_COPY)
     return [
     (0x1001, 0x4004, 0x0000000e, False),
     (0x2001, 0x5004, 0x0000000e, False),
     (0x1001, 0x400c, 0x000001e5, False),
-    (0x1001, 0x4010, 0x48000002, False),
+    (0x1001, 0x4010, _COPY_DPU_MODE if copy else 0x48000002, False),
     (0x1001, 0x4014, 0x00000000, False),
     (0x1001, 0x4020, 0x00000000, True),
     (0x1001, 0x4024, 0x00000000, True),
@@ -143,7 +163,7 @@ def _canon(op=EW_OP_ADD):
     (0x2001, 0x5020, 0x00000000, False),
     (0x2001, 0x5028, 0x00000000, False),
     (0x2001, 0x502c, 0x00000000, False),
-    (0x2001, 0x5034, 0x40000008, False),
+    (0x2001, 0x5034, _COPY_RDMA_MODE if copy else 0x40000008, False),
     (0x2001, 0x5038, 0x00000000, True),
     (0x2001, 0x5040, 0x00000000, True),
     (0x2001, 0x5044, _RDMA_BN_MUL.get(op, 0x00017849), False),
@@ -154,42 +174,14 @@ def _canon(op=EW_OP_ADD):
     (0x2001, 0x506c, 0x00000000, True),
 ]
 
-# Reshape/copy canon for the NPU side of a CPU-fallback op. Same 69-register DPU+
-# RDMA layout as the element-wise _canon, but configured as a pure copy (DPU
-# 0x4070 = 0x383, RDMA 0x5044 = 0x7801) rather than arithmetic. For the [1,4]
-# bool/int8 shape it is fully shape-invariant (decoded byte-exact from the n=2..5
-# chained-And references; all reshape blocks are identical). The chain address in
-# the following PC(0x0010) word is patched per-block by the descriptor prefix.
-_RESHAPE_COPY_CANON = [
-    0x10010000000e4004, 0x20010000000e5004, 0x1001000001e5400c,
-    0x1001000000004010, 0x1001000000004014, 0x1001000000004020,
-    0x1001000000404024, 0x1001000000014030, 0x1001000000014034,
-    0x1001000000004038, 0x1001000f000f403c, 0x1001000000534040,
-    0x1001000000004044, 0x1001000000004048, 0x100100000000404c,
-    0x1001000000024050, 0x1001000000004054, 0x10010000000f4058,
-    0x100100010001405c, 0x1001000000534060, 0x1001000000004064,
-    0x1001000000004068, 0x100100000000406c, 0x1001000003834070,
-    0x1001000000004074, 0x1001000000014078, 0x100100000000407c,
-    0x1001000000004080, 0x1001000000014084, 0x1001000000004088,
-    0x1001000000004090, 0x1001000000004094, 0x1001000000004098,
-    0x100100000000409c, 0x10010000000040a0, 0x10010000000040a4,
-    0x10010000000040a8, 0x10010000000040ac, 0x10010000004040c0,
-    0x10010000000040c4, 0x1001000000004100, 0x1001000000004104,
-    0x1001000000004108, 0x100100000000410c, 0x1001000000004110,
-    0x1001000000004114, 0x1001000000004118, 0x100100000000411c,
-    0x1001000000004120, 0x1001000000004124, 0x1001000000004128,
-    0x100100000000412c, 0x200100000001500c, 0x2001000000015010,
-    0x20010000000f5014, 0x2001000000005018, 0x200100000000501c,
-    0x2001000000005020, 0x2001000000005028, 0x200100000000502c,
-    0x2001000000015034, 0x2001000000005038, 0x2001000000005040,
-    0x2001000078015044, 0x2001000000005048, 0x200100000000504c,
-    0x2001000000005064, 0x2001010101015068, 0x200100000000506c,
-]
-
-
 def reshape_copy_canon_words():
-    """The 69-word NPU reshape/copy canon (CPU-op block). Shape-invariant [1,4]."""
-    return list(_RESHAPE_COPY_CANON)
+    """The 69-word NPU reshape/copy canon (CPU-op block) for the [1,4] bool shape.
+
+    This is the same _canon register block as the element-wise ops, dispatched
+    through EW_OP_COPY: copy cfg values plus the constant [1,4] reshape geometry
+    baked into the otherwise-patched fields. Byte-exact vs the chained-And refs.
+    """
+    return _canon_words(EW_OP_COPY)
 
 
 GAP69 = [
@@ -315,6 +307,11 @@ def _build_trailing(n):
 
 
 def _canon_words(op=EW_OP_ADD):
+    if op == EW_OP_COPY:
+        # Copy mode bakes the constant [1,4] reshape geometry into the fields the
+        # element-wise path patches per-block, so they are not zeroed here.
+        return [_w(t, r, _COPY_SHAPE_FILL.get(r, 0) if p else v)
+                for (t, r, v, p) in _canon(op)]
     return [_w(t, r, 0 if p else v) for (t, r, v, p) in _canon(op)]
 
 
@@ -400,190 +397,6 @@ def build_template(n_inputs, ops=None):
 # alignment of even-n streams naturally; the generated prefix/trailing schedules
 # produce the correct half-word alignment.
 
-# Legacy decoded n=2..5 prefixes kept only as reverse-engineering reference data.
-# The production CPU path uses _cpu_prefix_u32().
-_CPU_PREFIX_U32_LEGACY_2_5 = {
-    2: [
-        0x00000010, 0x00000008, 0x00000001, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000007, 0x73725f61, 0x0031695f, 0x00000001,
-        0x00000004, 0x00000001, 0x00000004, 0x00340028, 0x00000000, 0x00040000,
-        0x000c0008, 0x00140010, 0x001c0018, 0x00240020, 0x00000000, 0x00280000,
-        0x0030002c, 0x00000028, 0x00000068, 0x00000060, 0x00000054, 0x00000048,
-        0x0000003c, 0x00000034, 0x0000002c, 0x00000024, 0x0000001c, 0x00000014,
-        0x0000000c, 0x00000004, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000006,
-        0x00000094, 0x0000007c, 0x00000060, 0x00000044, 0x00000028, 0x0000000c,
-        0x00060000, 0x00040012, 0x00000006, 0x00000074, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x000001dc, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x00000984, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x000009ac, 0x00000000, 0x00000000,
-        0x00060000, 0x00040010, 0x00000006, 0x000009d4, 0x00000000, 0x00000000,
-        0x00040004, 0x00000004, 0x00000168, 0x00000000, 0x00000002, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000003, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000280, 0x00000000, 0x00000000,
-        0x00000005, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000500, 0x00000000, 0x00000000, 0x00000002, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000003, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000280, 0x00000000, 0x00000000,
-        0x00000005, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000500, 0x00000000, 0x00000000, 0x00000002, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000003, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000280, 0x00000000, 0x00000000,
-        0x00000005, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000500, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000780,
-    ],
-    3: [
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000007, 0x73725f61, 0x0031695f, 0x00000001,
-        0x00000004, 0x00000001, 0x00000004, 0x00340028, 0x00000000, 0x00040000,
-        0x000c0008, 0x00140010, 0x001c0018, 0x00240020, 0x00000000, 0x00280000,
-        0x0030002c, 0x00000028, 0x00000068, 0x00000060, 0x00000054, 0x00000048,
-        0x0000003c, 0x00000034, 0x0000002c, 0x00000024, 0x0000001c, 0x00000014,
-        0x0000000c, 0x00000004, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000007,
-        0x000000b0, 0x00000098, 0x0000007c, 0x00000060, 0x00000044, 0x00000028,
-        0x0000000c, 0x00060000, 0x00040012, 0x00000006, 0x0000008c, 0x00000000,
-        0x00000000, 0x00060000, 0x00040012, 0x00000006, 0x00000274, 0x00000000,
-        0x00000000, 0x00060000, 0x00040012, 0x00000006, 0x00000c9c, 0x00000000,
-        0x00000000, 0x00060000, 0x00040012, 0x00000006, 0x00000cc4, 0x00000000,
-        0x00000000, 0x00060000, 0x00040012, 0x00000006, 0x00000cec, 0x00000000,
-        0x00000000, 0x00060000, 0x00040010, 0x00000006, 0x00000d14, 0x00000000,
-        0x00000000, 0x00040004, 0x00000004, 0x000001e0, 0x00000000, 0x00000003,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000004, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000280, 0x00000000,
-        0x00000000, 0x00000006, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000500, 0x00000000, 0x00000000, 0x00000008,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000780, 0x00000000, 0x00000000, 0x00000003, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000004, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000280, 0x00000000, 0x00000000, 0x00000006,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000500, 0x00000000, 0x00000000, 0x00000008, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000780, 0x00000000,
-        0x00000000, 0x00000003, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000004,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000280, 0x00000000, 0x00000000, 0x00000006, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000500, 0x00000000,
-        0x00000000, 0x00000008, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000780, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000a00,
-    ],
-    4: [
-        0x0000002c, 0x00000024, 0x00000020, 0x00000018, 0x00000010, 0x00000008,
-        0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000007, 0x73725f61, 0x0031695f, 0x00000001, 0x00000004, 0x00000001,
-        0x00000004, 0x00340028, 0x00000000, 0x00040000, 0x000c0008, 0x00140010,
-        0x001c0018, 0x00240020, 0x00000000, 0x00280000, 0x0030002c, 0x00000028,
-        0x00000068, 0x00000060, 0x00000054, 0x00000048, 0x0000003c, 0x00000034,
-        0x0000002c, 0x00000024, 0x0000001c, 0x00000014, 0x0000000c, 0x00000004,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000008, 0x000000cc, 0x000000b4,
-        0x00000098, 0x0000007c, 0x00000060, 0x00000044, 0x00000028, 0x0000000c,
-        0x00060000, 0x00040012, 0x00000006, 0x000000a4, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x0000030c, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x00000fb4, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x00000fdc, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x00001004, 0x00000000, 0x00000000,
-        0x00060000, 0x00040012, 0x00000006, 0x0000102c, 0x00000000, 0x00000000,
-        0x00060000, 0x00040010, 0x00000006, 0x00001054, 0x00000000, 0x00000000,
-        0x00040004, 0x00000004, 0x00000258, 0x00000000, 0x00000004, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000005, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000280, 0x00000000, 0x00000000,
-        0x00000007, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000500, 0x00000000, 0x00000000, 0x00000009, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000780,
-        0x00000000, 0x00000000, 0x0000000b, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000a00, 0x00000000, 0x00000000,
-        0x00000004, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000005, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000280,
-        0x00000000, 0x00000000, 0x00000007, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000500, 0x00000000, 0x00000000,
-        0x00000009, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000780, 0x00000000, 0x00000000, 0x0000000b, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000a00,
-        0x00000000, 0x00000000, 0x00000004, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000005, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000280, 0x00000000, 0x00000000, 0x00000007, 0x00000018,
-        0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000500,
-        0x00000000, 0x00000000, 0x00000009, 0x00000018, 0x00000300, 0x0001ffff,
-        0x00000000, 0x00000045, 0x00000000, 0x00000780, 0x00000000, 0x00000000,
-        0x0000000b, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045,
-        0x00000000, 0x00000a00, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000c80,
-    ],
-    5: [
-        0x00000010, 0x00000008, 0x00000001, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000007, 0x73725f61, 0x0031695f, 0x00000001,
-        0x00000004, 0x00000001, 0x00000004, 0x00340028, 0x00000000, 0x00040000,
-        0x000c0008, 0x00140010, 0x001c0018, 0x00240020, 0x00000000, 0x00280000,
-        0x0030002c, 0x00000028, 0x00000068, 0x00000060, 0x00000054, 0x00000048,
-        0x0000003c, 0x00000034, 0x0000002c, 0x00000024, 0x0000001c, 0x00000014,
-        0x0000000c, 0x00000004, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000009,
-        0x000000e8, 0x000000d0, 0x000000b4, 0x00000098, 0x0000007c, 0x00000060,
-        0x00000044, 0x00000028, 0x0000000c, 0x00060000, 0x00040012, 0x00000006,
-        0x000000bc, 0x00000000, 0x00000000, 0x00060000, 0x00040012, 0x00000006,
-        0x000003a4, 0x00000000, 0x00000000, 0x00060000, 0x00040012, 0x00000006,
-        0x000012cc, 0x00000000, 0x00000000, 0x00060000, 0x00040012, 0x00000006,
-        0x000012f4, 0x00000000, 0x00000000, 0x00060000, 0x00040012, 0x00000006,
-        0x0000131c, 0x00000000, 0x00000000, 0x00060000, 0x00040012, 0x00000006,
-        0x00001344, 0x00000000, 0x00000000, 0x00060000, 0x00040012, 0x00000006,
-        0x0000136c, 0x00000000, 0x00000000, 0x00060000, 0x00040010, 0x00000006,
-        0x00001394, 0x00000000, 0x00000000, 0x00040004, 0x00000004, 0x000002d0,
-        0x00000000, 0x00000005, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000006,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000280, 0x00000000, 0x00000000, 0x00000008, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000500, 0x00000000,
-        0x00000000, 0x0000000a, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000780, 0x00000000, 0x00000000, 0x0000000c,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000a00, 0x00000000, 0x00000000, 0x0000000e, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000c80, 0x00000000,
-        0x00000000, 0x00000005, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000006,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000280, 0x00000000, 0x00000000, 0x00000008, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000500, 0x00000000,
-        0x00000000, 0x0000000a, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000780, 0x00000000, 0x00000000, 0x0000000c,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000a00, 0x00000000, 0x00000000, 0x0000000e, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000c80, 0x00000000,
-        0x00000000, 0x00000005, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000006,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000280, 0x00000000, 0x00000000, 0x00000008, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000500, 0x00000000,
-        0x00000000, 0x0000000a, 0x00000018, 0x00000300, 0x0001ffff, 0x00000000,
-        0x00000045, 0x00000000, 0x00000780, 0x00000000, 0x00000000, 0x0000000c,
-        0x00000018, 0x00000300, 0x0001ffff, 0x00000000, 0x00000045, 0x00000000,
-        0x00000a00, 0x00000000, 0x00000000, 0x0000000e, 0x00000018, 0x00000300,
-        0x0001ffff, 0x00000000, 0x00000045, 0x00000000, 0x00000c80, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000f00,
-    ],
-}
-
-
 def _u64_list_to_u32(words64):
     out = []
     for w in words64:
@@ -613,58 +426,64 @@ def _pc_chain_u32(addr):
     return _u64_list_to_u32([_w(_PC, 0x0010, addr)])
 
 
-_CPU_FIXED30_U32 = [
-    0x00000007, 0x73725f61, 0x0031695f, 0x00000001,
-    0x00000004, 0x00000001, 0x00000004, 0x00340028,
-    0x00000000, 0x00040000, 0x000c0008, 0x00140010,
-    0x001c0018, 0x00240020, 0x00000000, 0x00280000,
-    0x0030002c, 0x00000028, 0x00000068, 0x00000060,
-    0x00000054, 0x00000048, 0x0000003c, 0x00000034,
-    0x0000002c, 0x00000024, 0x0000001c, 0x00000014,
-    0x0000000c, 0x00000004,
-]
+def _cpu_fixed_header():
+    """The constant CPU descriptor header (was the flat _CPU_FIXED30_U32 blob).
 
-# Positive values select an offset lead (followed by 11 zeros). Negative values
-# mean a zero-only lead of -code words. The non-lead descriptor body below is
-# closed-form; this compact schedule is the only decoded per-n CPU prefix state.
-_CPU_LEAD_CODES = {
-    2: 3, 3: -8, 4: 7, 5: 3, 6: -8, 7: -4, 8: 3, 9: -10,
-    10: -4, 11: 3, 12: -8, 13: -4, 14: 3, 15: -8, 16: 7,
-    17: 3, 18: -8, 19: 7, 20: 1, 21: -8, 22: 7, 23: 1,
-    24: -6, 25: 7, 26: 1, 27: -6, 28: 5, 29: 1, 30: -6,
-    31: 3, 32: -4, 33: -10, 34: 3, 35: -4, 36: -10, 37: 5,
-    38: -4, 39: -10, 40: 5, 41: -6, 42: -10, 43: 5, 44: -6,
-    45: 1, 46: 5, 47: -6, 48: 1, 49: 1, 50: -6, 51: 1,
-    52: 7, 53: -8, 54: 1, 55: 1, 56: -8, 57: 3, 58: 7,
-    59: -8, 60: -8, 61: 3, 62: -8, 63: 3, 64: -4,
-}
-
-_CPU_OFFSET_LEADS = {
-    1: [0x00000001],
-    3: [0x00000010, 0x00000008, 0x00000001],
-    5: [0x00000020, 0x00000018, 0x00000010, 0x00000008, 0x00000001],
-    7: [
-        0x0000002c, 0x00000024, 0x00000020, 0x00000018,
-        0x00000010, 0x00000008, 0x00000001,
-    ],
-}
+    Structure (30 u32): a length-prefixed reshape tensor name, a few small
+    constants, an interleaved 16-bit ascending offset stream, and a descending
+    copy-descriptor size table. It is identical for every n.
+    """
+    out = [7]                                            # name length
+    out += list(struct.unpack("<2I", b"a_rs_i1\x00"))    # "a_rs_i1" name
+    out += [1, 4, 1, 4]                                  # bool [1,4] shape pair
+    out.append((0x34 << 16) | 0x28)                      # packed (0x28, 0x34)
+    # interleaved 16-bit offsets: 3 zeros, 4..36 step 4, 3 zeros, 40,44,48
+    stream = [0, 0, 0] + list(range(4, 40, 4)) + [0, 0, 0] + [40, 44, 48]
+    for i in range(0, len(stream), 2):
+        out.append((stream[i + 1] << 16) | stream[i])
+    # descending offset table: a 40 lead, then the values 104,96,...,4 (an
+    # ascending run 4..60 step 8, then 72..104 step 12, reversed).
+    asc = [4 + 8 * k for k in range(8)] + [72 + 12 * k for k in range(3)] + [104]
+    out += [40] + asc[::-1]
+    return out
 
 
-def _cpu_lead_u32(n):
-    code = _CPU_LEAD_CODES.get(n)
-    if code is None:
-        raise NotImplementedError(
-            f"CPU regcmd lead schedule not yet available for {n} inputs "
-            f"(have 2..{max(_CPU_LEAD_CODES)})")
-    if code < 0:
-        return [0] * (-code)
-    return list(_CPU_OFFSET_LEADS[code]) + [0] * 11
+# Offset-lead suffix sequence: an offset lead of length L (odd, 1..7) is the last
+# L entries of this list, followed by 11 zeros.
+_CPU_OFFSET_LEAD_SEQ = [0x2c, 0x24, 0x20, 0x18, 0x10, 0x08, 0x01]
 
 
-def _cpu_prefix_u32(n):
+def _cpu_nonlead_words(n):
+    """u32 word count of the CPU prefix excluding the alignment lead."""
+    header = 30 + 15 + 1 + (n + 4)         # fixed header + zeros + count + addr list
+    copydesc = (n + 3) * 6
+    preamble = 4
+    dma = 3 * (n + 1) * 10 + ((2 * n) % 16) + 1
+    return header + copydesc + preamble + dma
+
+
+def _cpu_lead_u32(n, rc_word_off):
+    """Alignment lead so the reshape/copy canon lands on a 64-byte boundary.
+
+    rc_word_off is the RC section's u32 offset from the start of the file; the
+    section base header (0x40 bytes) contributes nothing mod 16, so this is
+    equivalently (FlatBuffer-body length // 4). The lead length is the pad
+    (mod 16 u32 = 64 bytes) needed to align the canon, bumped by a full 16-word
+    block when the raw pad is < 4 words. Leads of >= 12 words carry the
+    descending offset suffix; shorter leads are all zeros.
+    """
+    residue = rc_word_off % 16
+    pad = (-(residue + _cpu_nonlead_words(n))) % 16
+    length = pad if pad >= 4 else pad + 16
+    if length >= 12:
+        return _CPU_OFFSET_LEAD_SEQ[-(length - 11):] + [0] * 11
+    return [0] * length
+
+
+def _cpu_prefix_u32(n, rc_word_off):
     """Closed-form CPU descriptor prefix for a bool [1,4] CPU-op chain."""
-    words = _cpu_lead_u32(n)
-    words += list(_CPU_FIXED30_U32)
+    words = _cpu_lead_u32(n, rc_word_off)
+    words += _cpu_fixed_header()
     words += [0] * 15
 
     words.append(n + 4)
@@ -696,19 +515,20 @@ def _cpu_prefix_u32(n):
     return words
 
 
-def _cpu_trailing(n):
+def _cpu_trailing(n, prefix_words):
     """CPU-op regcmd tail as u64 words (cosmetic task descriptors; never patched).
 
     Record family parallel to _build_trailing, for the [1,4] bool shape: the
     output reshape record carries dim 4 (count 1); intermediate records carry
     [1,1,1,4]. The content is a prefix of the repeated intermediate-record
-    stream; the target length follows the toolkit's total RC section size.
+    stream; the target length follows the toolkit's total RC section size, so
+    it absorbs whatever the alignment lead added to the prefix.
     """
     if n == 2:
         return [0]
 
     total_u32 = 677 + 215 * (n - 2) - 16 * (n // 8)
-    target_u64 = (total_u32 - len(_cpu_prefix_u32(n)) - 160 * (n + 1)) // 2
+    target_u64 = (total_u32 - prefix_words - 160 * (n + 1)) // 2
 
     w = [0] * 7 + [0x0000001000000000, 0x1, 0x4]
     w += [0] * 5
@@ -718,25 +538,32 @@ def _cpu_trailing(n):
     return w[:target_u64]
 
 
-def _cpu_trailing_u32(n):
-    return _u64_list_to_u32(_cpu_trailing(n))
+def _cpu_trailing_u32(n, prefix_words):
+    return _u64_list_to_u32(_cpu_trailing(n, prefix_words))
 
 
-def build_cpu_template(n_inputs, ops=None):
-    """Build the reshape-only regcmd for an n-input CPU-fallback op chain."""
+def build_cpu_template(n_inputs, ops=None, rc_word_off=0):
+    """Build the reshape-only regcmd for an n-input CPU-fallback op chain.
+
+    rc_word_off is the RC section's u32 offset from the file start (equivalently
+    the FlatBuffer-body length // 4). The alignment lead is computed from it so
+    the reshape/copy canon lands on a 64-byte boundary, matching the toolkit's
+    placement. There is no per-n lead table; the layout offset is the only input.
+    """
     if not 2 <= n_inputs <= MAX_INPUTS:
         raise NotImplementedError(
             f"CPU regcmd template generation supports 2..{MAX_INPUTS} inputs, "
             f"got {n_inputs}")
     n_blocks = n_inputs + 1
-    u = _cpu_prefix_u32(n_inputs)
+    u = _cpu_prefix_u32(n_inputs, rc_word_off)
+    prefix_words = len(u)
     canon = _reshape_copy_canon_u32()
     for blk in range(n_blocks):
         if blk < n_blocks - 1:
             u += canon + _pc_chain_u32((blk + 1) * 0x280) + _pc14_u32() + _gap71_u32()
         else:
             u += canon + _gap69_u32()
-    u += _cpu_trailing_u32(n_inputs)
+    u += _cpu_trailing_u32(n_inputs, prefix_words)
     return struct.pack(f"<{len(u)}I", *u)
 
 
@@ -770,8 +597,9 @@ def verify_cpu_rc(refs_dir="/tmp"):
             e = vt + 4 + f * 2
             return u16(e) if e + 2 <= vt + vts else 0
 
-        ref_rc = d[u32(root + fld(root, 20)):u32(root + fld(root, 21))]
-        results[n] = build_cpu_template(n) == ref_rc
+        rc_off = u32(root + fld(root, 20))
+        ref_rc = d[rc_off:u32(root + fld(root, 21))]
+        results[n] = build_cpu_template(n, rc_word_off=rc_off // 4) == ref_rc
     return results
 
 
