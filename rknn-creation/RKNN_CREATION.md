@@ -769,6 +769,93 @@ NPU — verified for all 4 ops.
 
 ---
 
+## 6e. CPU-fallback ops: chained `And` (reshape-only NPU + CPU And nodes)
+
+ONNX `And` exports with `Target=CPU`; the runtime executes it on a CPU kernel
+(`CPU_OP_ENUMS["And"]=85`, node field `f7`). The NPU side runs only reshape/copy
+blocks; there are **no NPU compute blocks**. An n-input chain
+`out = (((a0 AND a1) AND a2) ... AND a_{n-1})` (shape `[1,4]`, bool/int8) has:
+
+- **3n+1 nodes**: n `InputOperator`, 2 `Reshape` (first two inputs), then n-2
+  interleaved `And`+`Reshape` pairs, 1 final `And`, 1 output `Reshape`, 1
+  `OutputOperator`. Node ordering verified against toolkit references n=2..5.
+- **5n+5 tensors**, `sg.f10 = [0,0,0,n+1,2n+2]`, n+1 reshape/copy command blocks.
+- **f7 routing** maps every block's reshape *result* to word 5 and its *source*
+  to word 55 of that 80-word block: input i -> `(i*80+55)`, rs i -> `(i*80+5)`;
+  output -> `(n*80+5)`, out-rs -> `(n*80+55)`.
+
+### Modular op dispatch (NOT a special-case path)
+
+Op type is the single source of truth in `rc_template_gen.py`:
+`CPU_OP_ENUMS`/`is_cpu_op`/`cpu_op_id` (CPU) vs `_OP_NAMES`/`ew_op_id` (NPU).
+Both the FlatBuffer node builder and the regcmd generator dispatch on it, so any
+op flows through the same modular path — no And/Add special method:
+
+- **FlatBuffer node** (`rknn_flatbuf._op_node`): NPU ops emit DPU geometry +
+  field `f3`; CPU ops emit field `f7 = cpu_op_id` + an empty attrs table `f8`,
+  with geometry zeroed. `_add_node` is a thin alias.
+- **regcmd** (`rc_template_gen.build_template`): an all-NPU chain emits compute
+  `_canon` blocks; an all-CPU chain dispatches to `build_cpu_template`. Mixed
+  NPU/CPU chains raise a clear `NotImplementedError` (FB nodes already handle
+  mixing; the mixed RC schedule is future work).
+
+### CPU regcmd is generated from scratch (byte-exact, no .rknn dependency)
+
+`build_cpu_template(n)` reproduces the chained-op RC **byte-for-byte** for
+n=2..5 (`verify_cpu_rc()` proves it) as a uint32 stream:
+
+```
+CPU descriptor prefix (per-n, _CPU_PREFIX_U32)
+(n+1) x [ reshape_copy_canon[138 u32] + PC(chain) + PC14 + GAP71 ]   # last: +GAP69
+CPU trailing (_cpu_trailing)
+```
+
+Key decodings:
+- The reshape/copy **canon is the same 69-register DPU+RDMA block** as the NPU
+  `_canon`, configured as a copy (DPU `0x4070=0x383`, RDMA `0x5044=0x7801`); for
+  `[1,4]` bool it is fully shape-invariant (`reshape_copy_canon_words`).
+- The PC chain-address + PC14 + GAP framing is **identical** to the NPU path.
+- Working on a **uint32** basis handles even-n half-word alignment naturally
+  (even-n streams carry one extra trailing 32-bit word).
+- The descriptor prefix (header + copy-descriptor table + DMA command list,
+  growing by one 5-word DMA command per block) is currently a decoded per-n
+  table `_CPU_PREFIX_U32`; the DMA-record closed form is the remaining cleanup.
+
+The **task descriptor** is likewise generated: `_taskdesc_cpu(n)` emits the same
+8-word reshape-descriptor family as `_taskdesc` but with the `[1,4]` bool dims
+(output record dims `[1,4]`, input records `[1,1,1,4]`); byte-exact vs the
+references n=2..5.
+
+The end-to-end on-device models (n=2..5, all-zero and all-ones vectors PASS) are
+built by `build_and_chain_scratch.py`. The **RC and taskdesc are fully generated**
+(`rc_template_gen.build_cpu_template` + `rknn_flatbuf._taskdesc_cpu`), asserted
+byte-exact against the reference, and verified to run on-device. The builder
+still reuses the toolkit reference FlatBuffer *body* while the from-scratch FB
+body is finalized (see blocker 1 below).
+
+**f20/f21 are absolute FILE offsets**, not FlatBuffer-relative targets. Patch
+with `value = HEADER_SIZE + body_offset_of_section` (production
+`_patch_root_f20_f21`).
+
+### Remaining from-scratch cleanup (CPU-only path)
+
+1. **FlatBuffer body**: the Python `flatbuffers.Builder` packs `uint8` table
+   fields (root f0, f10) differently from the toolkit's C++ builder. The result
+   is a *structurally valid* FlatBuffer (all uoffsets in-bounds, file id `RKNN`,
+   correct tensor/node/subgraph field values) that the runtime nonetheless
+   rejects with `Verify ModelBuffer failed! / Invalid RKNN format`. The reference
+   body (root tsize=92, f0@rel8 / f10@rel7 packed together) loads; the
+   Python-built body (tsize=84, f0@rel4 / f10@rel39 spread apart) does not. Fix
+   options: byte-level template patching of the reference body, or a C++ builder.
+   The modular `_op_node` already emits correct And/Add nodes; what remains is the
+   bool tensor dtype/size threading and the builder field-packing.
+2. **CPU descriptor prefix closed form**: `_CPU_PREFIX_U32` is a decoded per-n
+   table (DMA command list grows by one 5-word record per block). Replacing it
+   with a closed-form record generator is cleanup; correctness is already proven
+   byte-exact by `verify_cpu_rc()`.
+
+---
+
 ## 7. Toolbox
 
 | file | role |
@@ -787,4 +874,7 @@ NPU — verified for all 4 ops.
 | `extract_rknn_build_queue.py` | FlatBuffer parser (FB class) |
 | `decode_cmdbuf.py` | classify/decode regcmd blocks |
 | `rknn_run_generic` / `.cpp`, `rknn_verify*` / `.cpp` | vendor-API NPU correctness harnesses (`rknn_verify_n` = N-input, op-aware) |
+| `build_and_chain_scratch.py N` | CPU-fallback chained-`And` builder (§6e); reference-backed FB/RC/taskdesc, from-scratch container + trailer; n=2..5 PASS on-device |
+| `build_and_chain_ref_n.py N` | mint a chained-`And` reference model via on-device toolkit (n inputs) |
+| `test_and_chain_n.cpp` | n-input chained-`And` correctness harness (AND-of-all-inputs check) |
 | `/data/rk3588/rknn-header/rkt_registers.h` | rk3588 NPU register definitions |

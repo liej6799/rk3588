@@ -876,6 +876,32 @@ def _taskdesc(n_inputs):
     return struct.pack(f"<{len(words)}Q", *words)
 
 
+# CPU-fallback (bool [1,4]) taskdesc: same 8-word reshape-descriptor family as
+# _taskdesc, but with the [1,4] bool dims. The output reshape carries dims [1,4]
+# (f12=0x10), each input reshape carries [1,1,1,4] (f12=0x20). Byte-exact vs the
+# chained-And references n=2..5 (the records are cosmetic / never patched).
+_TD_CPU_DIM = 0x04
+
+
+def _taskdesc_cpu(n_inputs):
+    if n_inputs < 2:
+        raise ValueError(f"taskdesc not available for {n_inputs} inputs")
+    rec_out = _td_rec(_TD_F12_OUT, [1, _TD_CPU_DIM])
+    rec_in = _td_rec(_TD_F12_IN, [1, 1, 1, _TD_CPU_DIM])
+    if n_inputs == 2:
+        words = [0] * 6 + rec_out + rec_in + rec_in + [0]
+    elif n_inputs == 3:
+        words = [0] * 3 + rec_in * 3 + [0]
+    elif n_inputs == 4:
+        words = rec_in * 4 + [0]
+    else:
+        # General: emit (n-1) input reshape records preceded by a wrapped
+        # partial record so the stream length matches the runtime's schedule.
+        # The leading partial is the dims tail [1,1,4] of a wrapped rec_in.
+        words = [1, 1, _TD_CPU_DIM, 0, 0, 0] + rec_in * (n_inputs - 2) + [0]
+    return struct.pack(f"<{len(words)}Q", *words)
+
+
 def _patch_regcmd(full, rc_offset, n_adds, C1, W, tiles, ops=None):
     n = len(full) // 8
     spans, w = _regcmd_spans(bytes(full))
@@ -1056,26 +1082,59 @@ def _reshape_node(b, rs_name, src_name, input_indices, output_indices):
     return b.EndObject()
 
 
-def _add_node(b, add_num, in_a_idx, in_b_idx, out_idx, op="Add"):
+def _empty_attrs_table(b):
+    """Empty CPU-op attributes table (node field f8). StartObject(0)/EndObject()."""
+    b.StartObject(0)
+    return b.EndObject()
+
+
+def _op_node(b, op_num, in_a_idx, in_b_idx, out_idx, op="Add"):
+    """Binary op node, modular over NPU element-wise and CPU-fallback ops.
+
+    NPU ops (Add/Sub/Mul/Div) carry node field f3 = DPU op-type (2) and the
+    NPU geometry vectors. CPU ops (And/...) instead carry field f7 = the runtime
+    CPU op-type enum and field f8 = an empty attributes table, with the geometry
+    vectors zeroed (the NPU only reshapes; the CPU kernel does the compute).
+    """
+    cpu = rc_template_gen.is_cpu_op(op)
     op_s = _str(b, op)
-    nm_s = _str(b, f"{op}:{op.lower()}{add_num}")
+    if cpu:
+        nm_s = _str(b, f"{op}:{op}:{op.lower()}{op_num}")
+    else:
+        nm_s = _str(b, f"{op}:{op.lower()}{op_num}")
     f4 = _vec(b, [in_a_idx, in_b_idx])
     f5 = _vec(b, [out_idx])
-    f9 = _ev(b)
-    f10 = _vec(b, [1, 1, 1, 1, 1, 1])
-    f11 = _vec(b, [0, 0, 0, 0, 0, 0])
-    f12 = _vec(b, [160, 0, 0, 80, 80, 0, 64, 48, 48])
+    if cpu:
+        f8 = _empty_attrs_table(b)
+        f9 = _ev(b)
+        f10 = _vec(b, [0, 0, 0, 0, 0, 0])
+        f11 = _vec(b, [0, 0, 0, 0, 0, 0])
+        f12 = _vec(b, [0, 0, 0, 0, 0, 0, 0, 0, 0])
+    else:
+        f9 = _ev(b)
+        f10 = _vec(b, [1, 1, 1, 1, 1, 1])
+        f11 = _vec(b, [0, 0, 0, 0, 0, 0])
+        f12 = _vec(b, [160, 0, 0, 80, 80, 0, 64, 48, 48])
     b.StartObject(13)
     b.PrependUOffsetTRelativeSlot(12, f12, 0)
     b.PrependUOffsetTRelativeSlot(11, f11, 0)
     b.PrependUOffsetTRelativeSlot(10, f10, 0)
     b.PrependUOffsetTRelativeSlot(9, f9, 0)
+    if cpu:
+        b.PrependUOffsetTRelativeSlot(8, f8, 0)
+        b.PrependUint8Slot(7, rc_template_gen.cpu_op_id(op), 0)
     b.PrependUOffsetTRelativeSlot(5, f5, 0)
     b.PrependUOffsetTRelativeSlot(4, f4, 0)
-    b.PrependUint8Slot(3, 2, 0)
+    if not cpu:
+        b.PrependUint8Slot(3, 2, 0)
     b.PrependUOffsetTRelativeSlot(2, nm_s, 0)
     b.PrependUOffsetTRelativeSlot(1, op_s, 0)
     return b.EndObject()
+
+
+# Backwards-compatible alias.
+def _add_node(b, add_num, in_a_idx, in_b_idx, out_idx, op="Add"):
+    return _op_node(b, add_num, in_a_idx, in_b_idx, out_idx, op)
 
 
 def _output_node(b, outp, tensor_idx):
