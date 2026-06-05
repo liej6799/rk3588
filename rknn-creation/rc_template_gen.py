@@ -203,34 +203,54 @@ GAP71 = [
 
 PC14 = 0x0101000000240014
 
-_EVEN_CORE = [
-    0x0000000400000001, 0x0000000400000001, 0x0000000000340028,
-    0x000c000800040000, 0x001c001800140010, 0x0000000000240020,
-    0x0030002c00280000, 0x0000006800000028, 0x0000005400000060,
-    0x0000003c00000048, 0x0000002c00000034, 0x0000001c00000024,
-    0x0000000c00000014, 0x0000000000000004,
-]
 
-_ODD_CORE = [
-    0x0000000100000004, 0x0034002800000004, 0x0004000000000000,
-    0x00140010000c0008, 0x00240020001c0018, 0x0028000000000000,
-    0x000000280030002c, 0x0000006000000068, 0x0000004800000054,
-    0x000000340000003c, 0x000000240000002c, 0x000000140000001c,
-    0x000000040000000c,
-]
+def _fixed_header(name=b"a_rs_i1\x00"):
+    """The constant 30-u32 descriptor header shared by the NPU and CPU prefixes.
+
+    Structure: a length-prefixed reshape tensor name, a few small constants, an
+    interleaved 16-bit ascending offset stream, and a descending copy-descriptor
+    size table. Identical for every n; only the 2-input NPU case swaps the name
+    ("x_rs_i1" vs "a_rs_i1"). The CPU prefix uses it as-is; the NPU prefix wraps
+    it in the even/odd u32-alignment phase.
+    """
+    out = [7]                                            # name length
+    out += list(struct.unpack("<2I", name))              # tensor name
+    out += [1, 4, 1, 4]                                  # bool [1,4] shape pair
+    out.append((0x34 << 16) | 0x28)                      # packed (0x28, 0x34)
+    # interleaved 16-bit offsets: 3 zeros, 4..36 step 4, 3 zeros, 40,44,48
+    stream = [0, 0, 0] + list(range(4, 40, 4)) + [0, 0, 0] + [40, 44, 48]
+    for i in range(0, len(stream), 2):
+        out.append((stream[i + 1] << 16) | stream[i])
+    # descending offset table: a 40 lead, then the values 104,96,...,4 (an
+    # ascending run 4..60 step 8, then 72..104 step 12, reversed).
+    asc = [4 + 8 * k for k in range(8)] + [72 + 12 * k for k in range(3)] + [104]
+    out += [40] + asc[::-1]
+    return out
 
 
-def _build_prefix(n):
+def _u32_to_u64(words32):
+    """Pack an even-length u32 list into u64 words (lo, hi) -> one u64 each."""
+    out = []
+    for i in range(0, len(words32), 2):
+        out.append((words32[i + 1] << 32) | words32[i])
+    return out
+
+
+def _npu_prefix(n):
+    """NPU element-wise descriptor prefix (u64 words). See _build_prefix."""
     n_adds = n - 1
     even = (n % 2 == 0)
 
+    # The 30-u32 _fixed_header is shared with the CPU prefix; the NPU stream wraps
+    # it in the even/odd u32-alignment phase (even-n carries a half-word offset,
+    # so the header is bracketed by a leading and trailing zero u32).
+    fixed = _fixed_header(b"x_rs_i1\x00" if n == 2 else b"a_rs_i1\x00")
     if even:
         n_lead = min((n - 2) // 2 + 1, 3)
-        str_w2 = 0x0031695f73725f78 if n == 2 else 0x0031695f73725f61
-        header = [0] * n_lead + [0x0000000700000000, str_w2] + list(_EVEN_CORE)
+        header = [0] * n_lead + _u32_to_u64([0] + fixed + [0])
     else:
         n_lead = 3 + (1 if n >= 7 else 0)
-        header = [0] * n_lead + [0x73725f6100000007, 0x000000010031695f] + list(_ODD_CORE)
+        header = [0] * n_lead + _u32_to_u64(fixed)
 
     words = list(header) + [0] * 7
 
@@ -283,7 +303,7 @@ def _build_prefix(n):
 
 
 OFF = {n: (4 if n % 2 == 0 else 0) for n in range(2, 99)}
-PREFIX = {n: _build_prefix(n) for n in range(2, 99)}
+PREFIX = {n: _npu_prefix(n) for n in range(2, 99)}
 
 
 def _build_trailing(n):
@@ -340,14 +360,20 @@ def _normalize_ops(n_adds, ops):
     return out[:n_adds]
 
 
-def build_template(n_inputs, ops=None):
-    """Modular regcmd generator.
+def build_template(n_inputs, ops=None, rc_word_off=0):
+    """Modular regcmd generator (single path for NPU and CPU ops).
 
     Dispatches on op type: a chain of NPU element-wise ops (Add/Sub/Mul/Div)
-    produces compute _canon blocks; a chain of CPU-fallback ops (And/...)
-    produces reshape/copy canon blocks with a CPU descriptor prefix. Mixed
-    NPU/CPU chains are not yet supported by the RC generator (the FlatBuffer
-    node builder already handles them modularly).
+    produces 6 tiles of compute `_canon` blocks; a chain of CPU-fallback ops
+    (And/...) produces n+1 reshape/copy `_canon` blocks (op `EW_OP_COPY`) with a
+    CPU descriptor prefix. Both use the same `_canon`/PC/GAP framing; they differ
+    only in the prefix, the block count/order, and the trailing schedule. Mixed
+    NPU/CPU chains are not yet supported here (the FlatBuffer node builder
+    already handles them modularly).
+
+    rc_word_off is the RC section's u32 file offset (FlatBuffer-body length // 4);
+    it is used only by the CPU path to align the reshape/copy canon to a 64-byte
+    boundary, matching the toolkit's placement.
     """
     if not 2 <= n_inputs <= MAX_INPUTS:
         raise NotImplementedError(
@@ -356,16 +382,30 @@ def build_template(n_inputs, ops=None):
     op_names = _normalize_ops(n_adds, ops)
 
     cpu_flags = [is_cpu_op(o) for o in op_names]
-    if any(cpu_flags):
-        if not all(cpu_flags):
-            raise NotImplementedError(
-                "mixed NPU/CPU op chains are not yet supported by the RC "
-                f"generator (got ops={op_names})")
-        return build_cpu_template(n_inputs, op_names)
+    if any(cpu_flags) and not all(cpu_flags):
+        raise NotImplementedError(
+            "mixed NPU/CPU op chains are not yet supported by the RC "
+            f"generator (got ops={op_names})")
 
+    if all(cpu_flags):
+        # CPU-fallback chain: n+1 reshape/copy canon blocks (uint32 stream, with
+        # the CPU descriptor prefix and an alignment lead computed from rc_word_off).
+        n_blocks = n_inputs + 1
+        u = _build_prefix(n_inputs, EW_OP_COPY, rc_word_off)
+        prefix_words = len(u)
+        canon = _canon_u32(EW_OP_COPY)
+        for blk in range(n_blocks):
+            if blk < n_blocks - 1:
+                u += canon + _pc_chain_u32((blk + 1) * 0x280) + _pc14_u32() + _gap71_u32()
+            else:
+                u += canon + _gap69_u32()
+        u += _cpu_trailing_u32(n_inputs, prefix_words)
+        return struct.pack(f"<{len(u)}I", *u)
+
+    # NPU element-wise chain: 6 tiles of compute canon blocks (uint64 stream).
     ew_ids = [ew_op_id(o) for o in op_names]
     canon_per = [_canon_words(op) for op in ew_ids]
-    words = list(PREFIX[n_inputs])
+    words = list(_build_prefix(n_inputs))
     gbi = 0
     for _tile in range(6):
         for j in range(n_adds):
@@ -379,23 +419,20 @@ def build_template(n_inputs, ops=None):
     return b"\x00" * OFF[n_inputs] + struct.pack(f"<{len(words)}Q", *words)
 
 
-# ── CPU-fallback op regcmd (reshape/copy NPU side; CPU does the compute) ──
+# ── CPU-fallback op regcmd helpers (used by build_template's CPU branch) ──
 #
-# A CPU-fallback op (And/...) runs no NPU compute. The NPU only reshapes/copies
-# data; the CPU kernel does the logic. The regcmd is built as a uint32 stream:
+# A CPU-fallback op (And/...) runs no NPU compute: the NPU only reshapes/copies
+# data and the CPU kernel does the logic. build_template emits this as a uint32
+# stream of:
 #
 #   CPU descriptor prefix (u32)   header + copy-descriptor table + DMA cmd list
-#   (n+1) x reshape/copy canon block (u32) + PC/GAP framing
+#   (n+1) x _canon(EW_OP_COPY) block (u32) + PC/GAP framing
 #   CPU trailing (u32)            cosmetic task descriptors
 #
-# The reshape/copy canon (reshape_copy_canon_words) is shape-invariant for the
-# [1,4] bool shape. The framing (PC chain address + PC14 + GAP) is identical to
-# the NPU element-wise path. The CPU prefix is generated from closed-form
-# descriptor formulas; only the short lead/alignment schedule is table-driven.
-#
-# Working on a uint32 basis (rather than uint64) handles the half-word
-# alignment of even-n streams naturally; the generated prefix/trailing schedules
-# produce the correct half-word alignment.
+# The canon block, and the PC chain-address + PC14 + GAP framing, are the SAME as
+# the NPU element-wise path (just op=EW_OP_COPY). The CPU prefix is closed-form;
+# the alignment lead derives from the RC file offset. Working on a uint32 basis
+# (rather than uint64) handles the half-word alignment of even-n streams.
 
 def _u64_list_to_u32(words64):
     out = []
@@ -405,8 +442,9 @@ def _u64_list_to_u32(words64):
     return out
 
 
-def _reshape_copy_canon_u32():
-    return _u64_list_to_u32(reshape_copy_canon_words())
+def _canon_u32(op=EW_OP_ADD):
+    """The 69-register _canon block for `op` as a uint32 stream (CPU path)."""
+    return _u64_list_to_u32(_canon_words(op))
 
 
 def _gap71_u32():
@@ -424,28 +462,6 @@ def _pc14_u32():
 def _pc_chain_u32(addr):
     # PC(0x0010, addr) as one u64 -> two u32
     return _u64_list_to_u32([_w(_PC, 0x0010, addr)])
-
-
-def _cpu_fixed_header():
-    """The constant CPU descriptor header (was the flat _CPU_FIXED30_U32 blob).
-
-    Structure (30 u32): a length-prefixed reshape tensor name, a few small
-    constants, an interleaved 16-bit ascending offset stream, and a descending
-    copy-descriptor size table. It is identical for every n.
-    """
-    out = [7]                                            # name length
-    out += list(struct.unpack("<2I", b"a_rs_i1\x00"))    # "a_rs_i1" name
-    out += [1, 4, 1, 4]                                  # bool [1,4] shape pair
-    out.append((0x34 << 16) | 0x28)                      # packed (0x28, 0x34)
-    # interleaved 16-bit offsets: 3 zeros, 4..36 step 4, 3 zeros, 40,44,48
-    stream = [0, 0, 0] + list(range(4, 40, 4)) + [0, 0, 0] + [40, 44, 48]
-    for i in range(0, len(stream), 2):
-        out.append((stream[i + 1] << 16) | stream[i])
-    # descending offset table: a 40 lead, then the values 104,96,...,4 (an
-    # ascending run 4..60 step 8, then 72..104 step 12, reversed).
-    asc = [4 + 8 * k for k in range(8)] + [72 + 12 * k for k in range(3)] + [104]
-    out += [40] + asc[::-1]
-    return out
 
 
 # Offset-lead suffix sequence: an offset lead of length L (odd, 1..7) is the last
@@ -480,10 +496,10 @@ def _cpu_lead_u32(n, rc_word_off):
     return [0] * length
 
 
-def _cpu_prefix_u32(n, rc_word_off):
-    """Closed-form CPU descriptor prefix for a bool [1,4] CPU-op chain."""
+def _cpu_prefix(n, rc_word_off):
+    """Closed-form CPU descriptor prefix (u32 words) for a bool [1,4] op chain."""
     words = _cpu_lead_u32(n, rc_word_off)
-    words += _cpu_fixed_header()
+    words += _fixed_header()
     words += [0] * 15
 
     words.append(n + 4)
@@ -515,6 +531,21 @@ def _cpu_prefix_u32(n, rc_word_off):
     return words
 
 
+def _build_prefix(n, op=EW_OP_ADD, rc_word_off=0):
+    """Unified descriptor prefix for NPU compute and CPU copy chains.
+
+    Both prefixes share the same _fixed_header and the same conceptual layout
+    (header -> descriptor/size table -> copy descriptors -> DMA list -> tail);
+    they differ only in encoding (NPU packs u64 with the even/odd alignment phase,
+    CPU is a u32 stream with an alignment lead). op selects the body:
+      - EW_OP_COPY  -> CPU prefix (u32), aligned via rc_word_off
+      - anything else -> NPU element-wise prefix (u64), from the PREFIX cache
+    """
+    if op == EW_OP_COPY:
+        return _cpu_prefix(n, rc_word_off)
+    return PREFIX[n]
+
+
 def _cpu_trailing(n, prefix_words):
     """CPU-op regcmd tail as u64 words (cosmetic task descriptors; never patched).
 
@@ -543,32 +574,18 @@ def _cpu_trailing_u32(n, prefix_words):
 
 
 def build_cpu_template(n_inputs, ops=None, rc_word_off=0):
-    """Build the reshape-only regcmd for an n-input CPU-fallback op chain.
+    """Backward-compatible alias: build a CPU-fallback (all-`And`) regcmd chain.
 
-    rc_word_off is the RC section's u32 offset from the file start (equivalently
-    the FlatBuffer-body length // 4). The alignment lead is computed from it so
-    the reshape/copy canon lands on a 64-byte boundary, matching the toolkit's
-    placement. There is no per-n lead table; the layout offset is the only input.
+    Kept for callers that explicitly want the CPU path; it simply forwards to the
+    unified build_template with a chain of CPU ops.
     """
-    if not 2 <= n_inputs <= MAX_INPUTS:
-        raise NotImplementedError(
-            f"CPU regcmd template generation supports 2..{MAX_INPUTS} inputs, "
-            f"got {n_inputs}")
-    n_blocks = n_inputs + 1
-    u = _cpu_prefix_u32(n_inputs, rc_word_off)
-    prefix_words = len(u)
-    canon = _reshape_copy_canon_u32()
-    for blk in range(n_blocks):
-        if blk < n_blocks - 1:
-            u += canon + _pc_chain_u32((blk + 1) * 0x280) + _pc14_u32() + _gap71_u32()
-        else:
-            u += canon + _gap69_u32()
-    u += _cpu_trailing_u32(n_inputs, prefix_words)
-    return struct.pack(f"<{len(u)}I", *u)
+    if ops is None:
+        ops = ["And"] * (n_inputs - 1)
+    return build_template(n_inputs, ops, rc_word_off=rc_word_off)
 
 
 def verify_cpu_rc(refs_dir="/tmp"):
-    """Prove build_cpu_template(n) == the chained-op reference RC, byte-for-byte.
+    """Prove the CPU regcmd == the chained-op reference RC, byte-for-byte.
 
     Returns {n: bool}. Reference files are and_chain{n}_ref.rknn.
     """
@@ -599,7 +616,8 @@ def verify_cpu_rc(refs_dir="/tmp"):
 
         rc_off = u32(root + fld(root, 20))
         ref_rc = d[rc_off:u32(root + fld(root, 21))]
-        results[n] = build_cpu_template(n, rc_word_off=rc_off // 4) == ref_rc
+        gen = build_template(n, ops=["And"] * (n - 1), rc_word_off=rc_off // 4)
+        results[n] = gen == ref_rc
     return results
 
 
