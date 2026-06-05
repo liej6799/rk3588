@@ -802,10 +802,11 @@ op flows through the same modular path — no And/Add special method:
 ### CPU regcmd is generated from scratch (byte-exact, no .rknn dependency)
 
 `build_cpu_template(n)` reproduces the chained-op RC **byte-for-byte** for
-n=2..5 (`verify_cpu_rc()` proves it) as a uint32 stream:
+n=2..64 (`verify_cpu_rc()` proves it when the references are present) as a
+uint32 stream:
 
 ```
-CPU descriptor prefix (per-n, _CPU_PREFIX_U32)
+CPU descriptor prefix (_cpu_prefix_u32: compact lead schedule + closed-form records)
 (n+1) x [ reshape_copy_canon[138 u32] + PC(chain) + PC14 + GAP71 ]   # last: +GAP69
 CPU trailing (_cpu_trailing)
 ```
@@ -817,14 +818,16 @@ Key decodings:
 - The PC chain-address + PC14 + GAP framing is **identical** to the NPU path.
 - Working on a **uint32** basis handles even-n half-word alignment naturally
   (even-n streams carry one extra trailing 32-bit word).
-- The descriptor prefix (header + copy-descriptor table + DMA command list,
-  growing by one 5-word DMA command per block) is currently a decoded per-n
-  table `_CPU_PREFIX_U32`; the DMA-record closed form is the remaining cleanup.
+- The descriptor prefix is now generated from fixed header words, closed-form
+  address/copy-descriptor/DMA records, and a compact n=2..64 lead schedule.
+- The CPU trailing descriptor is a prefix of the repeated `[1,1,1,4]` record
+  stream, cut to the toolkit's total RC length schedule.
 
 The **task descriptor** is likewise generated: `_taskdesc_cpu(n)` emits the same
 8-word reshape-descriptor family as `_taskdesc` but with the `[1,4]` bool dims
-(output record dims `[1,4]`, input records `[1,1,1,4]`); byte-exact vs the
-references n=2..5.
+(output record dims `[1,4]`, input records `[1,1,1,4]`). For n>=3 it is a
+cyclic window keyed by the same compact CPU lead schedule; byte-exact vs the
+references n=2..64.
 
 The end-to-end on-device models (n=2..5, all-zero and all-ones vectors PASS) are
 built by `build_and_chain_scratch.py`. The **RC and taskdesc are fully generated**
@@ -849,11 +852,6 @@ with `value = HEADER_SIZE + body_offset_of_section` (production
    options: byte-level template patching of the reference body, or a C++ builder.
    The modular `_op_node` already emits correct And/Add nodes; what remains is the
    bool tensor dtype/size threading and the builder field-packing.
-2. **CPU descriptor prefix closed form**: `_CPU_PREFIX_U32` is a decoded per-n
-   table (DMA command list grows by one 5-word record per block). Replacing it
-   with a closed-form record generator is cleanup; correctness is already proven
-   byte-exact by `verify_cpu_rc()`.
-
 ---
 
 ## 7. Toolbox
@@ -874,7 +872,7 @@ with `value = HEADER_SIZE + body_offset_of_section` (production
 | `extract_rknn_build_queue.py` | FlatBuffer parser (FB class) |
 | `decode_cmdbuf.py` | classify/decode regcmd blocks |
 | `rknn_run_generic` / `.cpp`, `rknn_verify*` / `.cpp` | vendor-API NPU correctness harnesses (`rknn_verify_n` = N-input, op-aware) |
-| `build_and_chain_scratch.py N` | CPU-fallback chained-`And` builder (§6e); reference-backed FB/RC/taskdesc, from-scratch container + trailer; n=2..5 PASS on-device |
+| `build_and_chain_scratch.py N` | CPU-fallback chained-`And` builder (§6e); reference-backed FB body, generated RC/taskdesc, from-scratch container + trailer; n=2..5 PASS on-device |
 | `build_and_chain_ref_n.py N` | mint a chained-`And` reference model via on-device toolkit (n inputs) |
 | `test_and_chain_n.cpp` | n-input chained-`And` correctness harness (AND-of-all-inputs check) |
 | `/data/rk3588/rknn-header/rkt_registers.h` | rk3588 NPU register definitions |

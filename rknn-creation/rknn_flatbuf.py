@@ -878,8 +878,9 @@ def _taskdesc(n_inputs):
 
 # CPU-fallback (bool [1,4]) taskdesc: same 8-word reshape-descriptor family as
 # _taskdesc, but with the [1,4] bool dims. The output reshape carries dims [1,4]
-# (f12=0x10), each input reshape carries [1,1,1,4] (f12=0x20). Byte-exact vs the
-# chained-And references n=2..5 (the records are cosmetic / never patched).
+# (f12=0x10), each input reshape carries [1,1,1,4] (f12=0x20). For n>=3 the
+# taskdesc is a cyclic window into repeated input records; the window offset is
+# keyed by the same compact lead schedule used by the CPU regcmd prefix.
 _TD_CPU_DIM = 0x04
 
 
@@ -890,15 +891,17 @@ def _taskdesc_cpu(n_inputs):
     rec_in = _td_rec(_TD_F12_IN, [1, 1, 1, _TD_CPU_DIM])
     if n_inputs == 2:
         words = [0] * 6 + rec_out + rec_in + rec_in + [0]
-    elif n_inputs == 3:
-        words = [0] * 3 + rec_in * 3 + [0]
-    elif n_inputs == 4:
-        words = rec_in * 4 + [0]
     else:
-        # General: emit (n-1) input reshape records preceded by a wrapped
-        # partial record so the stream length matches the runtime's schedule.
-        # The leading partial is the dims tail [1,1,4] of a wrapped rec_in.
-        words = [1, 1, _TD_CPU_DIM, 0, 0, 0] + rec_in * (n_inputs - 2) + [0]
+        code = rc_template_gen._CPU_LEAD_CODES.get(n_inputs)
+        if code is None:
+            raise ValueError(f"taskdesc not available for {n_inputs} inputs")
+        if code > 0:
+            offset = (7 - code) // 2
+        else:
+            offset = 9 - ((-code) // 2)
+        total_words = 33 - offset
+        stream = rec_in * ((offset + total_words + _TD_REC_WORDS - 1) // _TD_REC_WORDS)
+        words = stream[offset:offset + total_words - 1] + [0]
     return struct.pack(f"<{len(words)}Q", *words)
 
 

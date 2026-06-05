@@ -393,15 +393,16 @@ def build_template(n_inputs, ops=None):
 #
 # The reshape/copy canon (reshape_copy_canon_words) is shape-invariant for the
 # [1,4] bool shape. The framing (PC chain address + PC14 + GAP) is identical to
-# the NPU element-wise path. The prefix is the per-block DMA command list whose
-# DMA region grows by 8 u32 (one 5-word command + gap) per extra input; it is
-# stored as a decoded table per n and proven byte-exact by verify_cpu_rc().
+# the NPU element-wise path. The CPU prefix is generated from closed-form
+# descriptor formulas; only the short lead/alignment schedule is table-driven.
 #
 # Working on a uint32 basis (rather than uint64) handles the half-word
-# alignment of even-n streams naturally: even-n RCs carry an extra trailing
-# 32-bit word, which falls out of the per-n prefix/trailing tables.
+# alignment of even-n streams naturally; the generated prefix/trailing schedules
+# produce the correct half-word alignment.
 
-_CPU_PREFIX_U32 = {
+# Legacy decoded n=2..5 prefixes kept only as reverse-engineering reference data.
+# The production CPU path uses _cpu_prefix_u32().
+_CPU_PREFIX_U32_LEGACY_2_5 = {
     2: [
         0x00000010, 0x00000008, 0x00000001, 0x00000000, 0x00000000, 0x00000000,
         0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
@@ -612,25 +613,109 @@ def _pc_chain_u32(addr):
     return _u64_list_to_u32([_w(_PC, 0x0010, addr)])
 
 
+_CPU_FIXED30_U32 = [
+    0x00000007, 0x73725f61, 0x0031695f, 0x00000001,
+    0x00000004, 0x00000001, 0x00000004, 0x00340028,
+    0x00000000, 0x00040000, 0x000c0008, 0x00140010,
+    0x001c0018, 0x00240020, 0x00000000, 0x00280000,
+    0x0030002c, 0x00000028, 0x00000068, 0x00000060,
+    0x00000054, 0x00000048, 0x0000003c, 0x00000034,
+    0x0000002c, 0x00000024, 0x0000001c, 0x00000014,
+    0x0000000c, 0x00000004,
+]
+
+# Positive values select an offset lead (followed by 11 zeros). Negative values
+# mean a zero-only lead of -code words. The non-lead descriptor body below is
+# closed-form; this compact schedule is the only decoded per-n CPU prefix state.
+_CPU_LEAD_CODES = {
+    2: 3, 3: -8, 4: 7, 5: 3, 6: -8, 7: -4, 8: 3, 9: -10,
+    10: -4, 11: 3, 12: -8, 13: -4, 14: 3, 15: -8, 16: 7,
+    17: 3, 18: -8, 19: 7, 20: 1, 21: -8, 22: 7, 23: 1,
+    24: -6, 25: 7, 26: 1, 27: -6, 28: 5, 29: 1, 30: -6,
+    31: 3, 32: -4, 33: -10, 34: 3, 35: -4, 36: -10, 37: 5,
+    38: -4, 39: -10, 40: 5, 41: -6, 42: -10, 43: 5, 44: -6,
+    45: 1, 46: 5, 47: -6, 48: 1, 49: 1, 50: -6, 51: 1,
+    52: 7, 53: -8, 54: 1, 55: 1, 56: -8, 57: 3, 58: 7,
+    59: -8, 60: -8, 61: 3, 62: -8, 63: 3, 64: -4,
+}
+
+_CPU_OFFSET_LEADS = {
+    1: [0x00000001],
+    3: [0x00000010, 0x00000008, 0x00000001],
+    5: [0x00000020, 0x00000018, 0x00000010, 0x00000008, 0x00000001],
+    7: [
+        0x0000002c, 0x00000024, 0x00000020, 0x00000018,
+        0x00000010, 0x00000008, 0x00000001,
+    ],
+}
+
+
+def _cpu_lead_u32(n):
+    code = _CPU_LEAD_CODES.get(n)
+    if code is None:
+        raise NotImplementedError(
+            f"CPU regcmd lead schedule not yet available for {n} inputs "
+            f"(have 2..{max(_CPU_LEAD_CODES)})")
+    if code < 0:
+        return [0] * (-code)
+    return list(_CPU_OFFSET_LEADS[code]) + [0] * 11
+
+
+def _cpu_prefix_u32(n):
+    """Closed-form CPU descriptor prefix for a bool [1,4] CPU-op chain."""
+    words = _cpu_lead_u32(n)
+    words += list(_CPU_FIXED30_U32)
+    words += [0] * 15
+
+    words.append(n + 4)
+    words.append(0x0c + 28 * (n + 3) - 4)
+    for i in range(1, n + 4):
+        words.append(0x0c + 28 * (n + 3 - i))
+
+    anomaly = 64 * (n // 8)
+    chain0 = 0x74 + 24 * (n - 2)
+    chain1 = 0x1dc + 152 * (n - 2) - anomaly
+    canon_base = 0x984 + 792 * (n - 2) - anomaly
+    copy_addrs = [chain0, chain1]
+    copy_addrs += [canon_base + 40 * k for k in range(n + 1)]
+    for i, addr in enumerate(copy_addrs):
+        marker = 0x00040010 if i == len(copy_addrs) - 1 else 0x00040012
+        words += [0x00060000, marker, 0x00000006, addr, 0, 0]
+
+    words += [0x00040004, 0x00000004, 0x168 + 120 * (n - 2), 0]
+    for _group in range(3):
+        for k in range(n + 1):
+            count = n if k == 0 else n + 2 * k - 1
+            words += [
+                count, 0x00000018, 0x00000300, 0x0001ffff, 0,
+                0x00000045, 0, 0x280 * k, 0, 0,
+            ]
+
+    words += [0] * ((2 * n) % 16)
+    words.append(0x280 * (n + 1))
+    return words
+
+
 def _cpu_trailing(n):
     """CPU-op regcmd tail as u64 words (cosmetic task descriptors; never patched).
 
     Record family parallel to _build_trailing, for the [1,4] bool shape: the
     output reshape record carries dim 4 (count 1); intermediate records carry
-    [1,1,1,4]. Byte-exact vs chained-And references n=2..5.
+    [1,1,1,4]. The content is a prefix of the repeated intermediate-record
+    stream; the target length follows the toolkit's total RC section size.
     """
-    ng = max(0, n - 2)
-    if ng == 0:
+    if n == 2:
         return [0]
+
+    total_u32 = 677 + 215 * (n - 2) - 16 * (n // 8)
+    target_u64 = (total_u32 - len(_cpu_prefix_u32(n)) - 160 * (n + 1)) // 2
+
     w = [0] * 7 + [0x0000001000000000, 0x1, 0x4]
-    if ng == 1:
-        return w + [0] * 2
     w += [0] * 5
-    for k in range(2, ng):
-        w += [0x0000002000000000, 0x1, 0x1, 0x1, 0x4] + [0] * 3
-    if ng >= 3:
-        w += [0x0000002000000000, 0x1]
-    return w
+    record = [0x0000002000000000, 0x1, 0x1, 0x1, 0x4, 0, 0, 0]
+    while len(w) < target_u64:
+        w += record
+    return w[:target_u64]
 
 
 def _cpu_trailing_u32(n):
@@ -639,12 +724,12 @@ def _cpu_trailing_u32(n):
 
 def build_cpu_template(n_inputs, ops=None):
     """Build the reshape-only regcmd for an n-input CPU-fallback op chain."""
-    if n_inputs not in _CPU_PREFIX_U32:
+    if not 2 <= n_inputs <= MAX_INPUTS:
         raise NotImplementedError(
-            f"CPU regcmd prefix not yet available for {n_inputs} inputs "
-            f"(have {sorted(_CPU_PREFIX_U32)})")
+            f"CPU regcmd template generation supports 2..{MAX_INPUTS} inputs, "
+            f"got {n_inputs}")
     n_blocks = n_inputs + 1
-    u = list(_CPU_PREFIX_U32[n_inputs])
+    u = _cpu_prefix_u32(n_inputs)
     canon = _reshape_copy_canon_u32()
     for blk in range(n_blocks):
         if blk < n_blocks - 1:
@@ -662,7 +747,7 @@ def verify_cpu_rc(refs_dir="/tmp"):
     """
     import os
     results = {}
-    for n in sorted(_CPU_PREFIX_U32):
+    for n in range(2, MAX_INPUTS + 1):
         path = os.path.join(refs_dir, f"and_chain{n}_ref.rknn")
         if not os.path.exists(path):
             continue
