@@ -805,7 +805,8 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inpu
 
     rc_target = _rc_target_offset(rc_raw, rc_n)
     root_rt = struct.unpack_from("<I", full, 0)[0]
-    for field_idx, offset in [(20, rc_target), (21, rc_len + rc_target + 4)]:
+    for field_idx, offset in [(20, rc_target),
+                              (21, rc_len + len(taskdesc) - 8)]:
         ab = _fb_field_abs(full, root_rt, field_idx)
         struct.pack_into("<I", full, ab, fb_len + offset - ab)
 
@@ -1176,9 +1177,407 @@ def _output_node(b, outp, tensor_idx):
     return b.EndObject()
 
 
-def _make_trailer(rows, cols, n_inputs):
+# ── CPU-fallback op body builder (bool [1,4] shape) ──
+
+_CPU_SLOT = 64
+
+
+def _cpu_io(n):
+    return [chr(97 + i) for i in range(n)], "out"
+
+
+def _cpu_mem_offsets(n):
+    """Workspace memory offsets for CPU ops, decoded from vendor references."""
+    plan = {}
+    ins, _ = _cpu_io(n)
+    for i, nm in enumerate(ins):
+        plan[nm] = (i * _CPU_SLOT, i > 0)
+    plan["out"] = (2 * _CPU_SLOT, True)
+    plan[f"{ins[0]}_exsec"] = (n * _CPU_SLOT, True)
+    plan[f"{ins[0]}_rs"] = ((n + 1) * _CPU_SLOT, True)
+    for i in range(1, n):
+        nm = ins[i]
+        plan[f"{nm}_exsec"] = (_CPU_SLOT, True) if i % 2 == 0 else (0, False)
+        plan[f"{nm}_rs"] = (n * _CPU_SLOT if i <= 2 else (i - 1) * _CPU_SLOT, True)
+    for k in range(1, n - 1):
+        plan[f"t{k}-rs" if n > 3 else "t-rs"] = (0, False)
+    if n % 2 == 0:
+        plan["out-rs"] = (0, False)
+        plan["out-rs_exsec"] = (_CPU_SLOT, True)
+    else:
+        plan["out-rs"] = (_CPU_SLOT, True)
+        plan["out-rs_exsec"] = (0, False)
+    return plan
+
+
+def _cpu_ext_input(b, name, f13_val, has_f13):
+    nm = _str(b, name)
+    v3 = _vec(b, [1, 1, 1, 1, 4])
+    v4 = _vec(b, [1, 4])
+    evs = [_ev(b) for _ in range(9)]
+    b.StartObject(18)
+    if has_f13 and f13_val:
+        b.PrependUint32Slot(13, f13_val, 0)
+    b.PrependUint32Slot(12, 4, 0)
+    for i, e in [(17, evs[0]), (16, evs[1]), (15, evs[2]), (11, evs[3]),
+                 (10, evs[4]), (9, evs[5]), (8, evs[6]), (7, evs[7]), (6, evs[8])]:
+        b.PrependUOffsetTRelativeSlot(i, e, 0)
+    b.PrependUOffsetTRelativeSlot(5, nm, 0)
+    b.PrependUOffsetTRelativeSlot(4, v4, 0)
+    b.PrependUOffsetTRelativeSlot(3, v3, 0)
+    b.PrependUint8Slot(2, 1, 0)
+    b.PrependUint8Slot(0, 3, 0)
+    return b.EndObject()
+
+
+def _cpu_ext_output(b, name):
+    nm = _str(b, name)
+    v3 = _vec(b, [1, 4])
+    v4 = _vec(b, [1, 4])
+    evs = [_ev(b) for _ in range(9)]
+    b.StartObject(18)
+    b.PrependUint32Slot(13, 2 * _CPU_SLOT, 0)
+    b.PrependUint32Slot(12, _CPU_SLOT, 0)
+    for i, e in [(17, evs[0]), (16, evs[1]), (15, evs[2]), (11, evs[3]),
+                 (10, evs[4]), (9, evs[5]), (8, evs[6]), (7, evs[7]), (6, evs[8])]:
+        b.PrependUOffsetTRelativeSlot(i, e, 0)
+    b.PrependUOffsetTRelativeSlot(5, nm, 0)
+    b.PrependUOffsetTRelativeSlot(4, v4, 0)
+    b.PrependUOffsetTRelativeSlot(3, v3, 0)
+    b.PrependUint8Slot(2, 2, 0)
+    b.PrependUint8Slot(0, 3, 0)
+    return b.EndObject()
+
+
+def _cpu_exsec(b, name, is_output, f13_val, has_f13):
+    nm = _str(b, name)
+    if is_output:
+        v3 = _vec(b, [1, 1, 1, 4, 16])
+        v4 = _vec(b, [1, 1, 1, 4])
+    else:
+        v3 = _vec(b, [1, 1, 1, 1, 16])
+        v4 = _vec(b, [1, 4])
+    evs = [_ev(b) for _ in range(9)]
+    b.StartObject(20 if is_output else 18)
+    if is_output:
+        b.PrependUint32Slot(19, 4, 0)
+    if has_f13 and f13_val:
+        b.PrependUint32Slot(13, f13_val, 0)
+    b.PrependUint32Slot(12, _CPU_SLOT, 0)
+    for i, e in [(17, evs[0]), (16, evs[1]), (15, evs[2]), (11, evs[3]),
+                 (10, evs[4]), (9, evs[5]), (8, evs[6]), (7, evs[7]), (6, evs[8])]:
+        b.PrependUOffsetTRelativeSlot(i, e, 0)
+    b.PrependUOffsetTRelativeSlot(5, nm, 0)
+    b.PrependUOffsetTRelativeSlot(4, v4, 0)
+    b.PrependUOffsetTRelativeSlot(3, v3, 0)
+    b.PrependUint8Slot(2, 3, 0)
+    b.PrependUint8Slot(1, 64, 0)
+    b.PrependUint8Slot(0, 3, 0)
+    return b.EndObject()
+
+
+def _cpu_rs(b, name, f13_val, has_f13):
+    nm = _str(b, name)
+    v3 = _vec(b, [1, 1, 1, 4])
+    v4 = _vec(b, [1, 1, 1, 4])
+    evs = [_ev(b) for _ in range(9)]
+    b.StartObject(20)
+    b.PrependUint32Slot(19, 4, 0)
+    if has_f13 and f13_val:
+        b.PrependUint32Slot(13, f13_val, 0)
+    b.PrependUint32Slot(12, _CPU_SLOT, 0)
+    for i, e in [(17, evs[0]), (16, evs[1]), (15, evs[2]), (11, evs[3]),
+                 (10, evs[4]), (9, evs[5]), (8, evs[6]), (7, evs[7]), (6, evs[8])]:
+        b.PrependUOffsetTRelativeSlot(i, e, 0)
+    b.PrependUOffsetTRelativeSlot(5, nm, 0)
+    b.PrependUOffsetTRelativeSlot(4, v4, 0)
+    b.PrependUOffsetTRelativeSlot(3, v3, 0)
+    b.PrependUint8Slot(2, 3, 0)
+    b.PrependUint8Slot(0, 3, 0)
+    return b.EndObject()
+
+
+def _cpu_reshape_node(b, rs_name, src_name, input_indices, output_indices):
+    op_s = _str(b, "Reshape")
+    nm_s = _str(b, f"Reshape:{rs_name}")
+    f4 = _vec(b, input_indices)
+    f5 = _vec(b, output_indices)
+    f9 = _ev(b)
+    f10 = _vec(b, [1, 1, 0, 1, 0, 0])
+    f11 = _vec(b, [0, 0, 0, 0, 0, 0])
+    f12 = _vec(b, [64, 0, 0, 0, 0, 0, 0, 0, 0])
+    b.StartObject(13)
+    b.PrependUOffsetTRelativeSlot(12, f12, 0)
+    b.PrependUOffsetTRelativeSlot(11, f11, 0)
+    b.PrependUOffsetTRelativeSlot(10, f10, 0)
+    b.PrependUOffsetTRelativeSlot(9, f9, 0)
+    b.PrependUOffsetTRelativeSlot(5, f5, 0)
+    b.PrependUOffsetTRelativeSlot(4, f4, 0)
+    b.PrependUint8Slot(3, 2, 0)
+    b.PrependUOffsetTRelativeSlot(2, nm_s, 0)
+    b.PrependUOffsetTRelativeSlot(1, op_s, 0)
+    return b.EndObject()
+
+
+def _cpu_output_node(b, outp, tensor_idx):
+    op_s = _str(b, "OutputOperator")
+    nm_s = _str(b, f"OutputOperator:{outp}")
+    full_name = f"OutputOperator:{outp}"
+    name_bytes = full_name.encode("ascii")
+    op_bytes = b"OutputOperator"
+    f9_data = [0, 0, 0, 0, 0, 1, tensor_idx, len(name_bytes)]
+    name_padded = name_bytes + b'\x00' * ((4 - len(name_bytes) % 4) % 4)
+    f9_data += list(struct.unpack(f"<{len(name_padded)//4}I", name_padded))
+    f9_data.append(len(op_bytes))
+    remaining = 16 - len(f9_data)
+    if remaining > 0:
+        op_padded = op_bytes + b'\x00' * ((4 - len(op_bytes) % 4) % 4)
+        op_u32s = list(struct.unpack(f"<{len(op_padded)//4}I", op_padded))
+        f9_data += op_u32s[:remaining]
+    f9_data = (f9_data + [0] * 16)[:16]
+    f4 = _vec(b, [tensor_idx])
+    f5 = _ev(b)
+    f9 = _vec(b, f9_data[:16])
+    f10 = _vec(b, [0, 0, 0, 0, 0, 0])
+    f11 = _vec(b, [0, 0, 0, 0, 0, 0])
+    f12 = _vec(b, [0, 0, 0, 0, 0, 0, 0, 0, 0])
+    b.StartObject(13)
+    b.PrependUOffsetTRelativeSlot(12, f12, 0)
+    b.PrependUOffsetTRelativeSlot(11, f11, 0)
+    b.PrependUOffsetTRelativeSlot(10, f10, 0)
+    b.PrependUOffsetTRelativeSlot(9, f9, 0)
+    b.PrependUOffsetTRelativeSlot(5, f5, 0)
+    b.PrependUOffsetTRelativeSlot(4, f4, 0)
+    b.PrependUOffsetTRelativeSlot(2, nm_s, 0)
+    b.PrependUOffsetTRelativeSlot(1, op_s, 0)
+    return b.EndObject()
+
+
+def _build_cpu_nodes(b, n, ins, outp, n_adds, idx, ops=None):
+    noffs = []
+    for nm in ins:
+        noffs.append(_input_node(b, nm, idx[nm]))
+    for nm in ins[:2]:
+        noffs.append(_cpu_reshape_node(
+            b, f"{nm}_rs", nm,
+            [idx[nm], idx[f"{nm}_rsi1"], idx[f"{nm}_exsec"]],
+            [idx[f"{nm}_rs"]]))
+    for k in range(n_adds):
+        if k == 0:
+            rs_a = f"{ins[0]}_rs"
+        else:
+            rs_a = "t-rs" if n == 3 else f"t{k}-rs"
+        rs_b = f"{ins[k + 1]}_rs"
+        if k == n_adds - 1:
+            rs_out = f"{outp}_rs"
+        else:
+            rs_out = "t-rs" if n == 3 else f"t{k + 1}-rs"
+        op_name = (ops[k] if ops and k < len(ops) else None) or "And"
+        noffs.append(_op_node(b, k + 1, idx[rs_a], idx[rs_b], idx[rs_out], op_name))
+        next_input = k + 2
+        if next_input < n:
+            nm = ins[next_input]
+            noffs.append(_cpu_reshape_node(
+                b, f"{nm}_rs", nm,
+                [idx[nm], idx[f"{nm}_rsi1"], idx[f"{nm}_exsec"]],
+                [idx[f"{nm}_rs"]]))
+    noffs.append(_cpu_reshape_node(
+        b, f"{outp}-rs", outp,
+        [idx[f"{outp}_rs"], idx[f"{outp}_rsi1"], idx[f"{outp}_rs_exsec"]],
+        [idx[outp]]))
+    noffs.append(_cpu_output_node(b, outp, idx[outp]))
+    return noffs
+
+
+def _build_cpu_tensors(b, n, ins, outp, n_adds, idx, mem):
+    toffs = [None] * (idx["task"] + 1)
+    toffs[idx["task"]] = _cmd_tensor(b, "task", f2=10, f18=n + 3)
+    toffs[idx["regcmd"]] = _cmd_tensor(b, "regcmd", f2=9, f18=n + 2)
+    toffs[idx[outp]] = _cpu_ext_output(b, outp)
+    omem = mem[f"{outp}-rs_exsec"]
+    toffs[idx[f"{outp}_rs_exsec"]] = _cpu_exsec(
+        b, f"{outp}-rs_exSecondary", True, omem[0], omem[1])
+    omem = mem[f"{outp}-rs"]
+    toffs[idx[f"{outp}_rs"]] = _cpu_rs(b, f"{outp}-rs", omem[0], omem[1])
+    for name in list(mem.keys()):
+        if name.startswith("t") and name.endswith("-rs") and name != f"{outp}-rs" and name in idx:
+            m = mem[name]
+            toffs[idx[name]] = _cpu_rs(b, name, m[0], m[1])
+    for nm in reversed(ins):
+        rs_name = f"{nm}_rs"
+        m = mem[rs_name]
+        toffs[idx[rs_name]] = _cpu_rs(b, rs_name, m[0], m[1])
+        m = mem[f"{nm}_exsec"]
+        toffs[idx[f"{nm}_exsec"]] = _cpu_exsec(
+            b, f"{nm}_exSecondary", False, m[0], m[1])
+    for nm in reversed(ins[1:]):
+        m = mem[nm]
+        toffs[idx[nm]] = _cpu_ext_input(b, nm, m[0], m[1])
+    m = mem[ins[0]]
+    toffs[idx[ins[0]]] = _cpu_ext_input(b, ins[0], m[0], m[1])
+    for i in range(n, -1, -1):
+        all_names = ins + [outp]
+        nm = all_names[i]
+        name_str = f"{nm}_rs_i1" if nm in ins else f"{outp}-rs_i1"
+        f12 = 16 if i == n else 32
+        toffs[idx[f"{all_names[i]}_rsi1"]] = _rsi1_tensor(b, name_str, i + 1, f12)
+    toffs[0] = _empty_tensor(b)
+    return toffs
+
+
+def _cpu_root_attrs(n):
+    ins, outp = _cpu_io(n)
+    shape = [1, 4]
+    attrs, quant = {}, {}
+    for i, nm in enumerate(ins):
+        attrs[nm] = {"idx": i, "shape": shape, "layout": "nchw", "layout_ori": "nchw",
+                      "is_output": False, "range": [0, 1], "origin_dynamic": False,
+                      "dtype": "bool", "mean": [0] * 4, "std": [1] * 4, "rgb2bgr": False}
+        quant[nm] = {"dtype": "bool", "qmethod": "", "qtype": "", "min": [],
+                      "max": [], "scale": [], "zero_point": [], "name": nm, "shape": shape}
+    attrs[outp] = {"is_output": True, "idx": 0, "shape": shape,
+                    "dtype": "bool", "layout": "nchw"}
+    quant[outp] = {"dtype": "bool", "qmethod": "", "qtype": "", "min": [],
+                    "max": [], "scale": [], "zero_point": [], "name": outp, "shape": shape}
+    return str({"attrs": attrs, "quant_tab": quant, "dynamic_shapes": {}})
+
+
+def _cpu_sg_f7_entry(b, name, offset):
+    vn = _str(b, name)
+    v1 = _vec_pairs(b, [(0, offset)])
+    v2 = _vec(b, [1])
+    b.StartObject(3)
+    b.PrependUOffsetTRelativeSlot(2, v2, 0)
+    b.PrependUOffsetTRelativeSlot(1, v1, 0)
+    b.PrependUOffsetTRelativeSlot(0, vn, 0)
+    return b.EndObject()
+
+
+def _build_cpu_subgraph(b, toffs, noffs, n, ins, outp, idx):
+    tvec = _ovec(b, toffs)
+    nvec = _ovec(b, noffs)
+    sg_f10 = _vec(b, [0, 0, 0, n + 1, 2 * (n + 1)])
+    sg_f12 = _ovec(b, [_str_scalar_table2(b, outp, n - 1)])
+    sg_f2 = _vec(b, [idx[ins[i]] for i in range(n)])
+    sg_f3 = _vec(b, [idx[outp]])
+    evs = [_ev(b) for _ in range(7)]
+    sg_f4 = _ovec(b, [
+        _vec_table3(b, [0] * 10, [0x3f800000] * 10, list(range(10)))
+        for _ in range(n)
+    ])
+    f7_entries = []
+    for i, nm in enumerate(ins):
+        f7_entries.append(_cpu_sg_f7_entry(b, nm, 55 + 80 * i))
+        f7_entries.append(_cpu_sg_f7_entry(b, f"{nm}_rs", 5 + 80 * i))
+    f7_entries.append(_cpu_sg_f7_entry(b, outp, 5 + 80 * n))
+    f7_entries.append(_cpu_sg_f7_entry(b, f"{outp}-rs", 55 + 80 * n))
+    sg_f7 = _ovec(b, f7_entries)
+    b.StartObject(17)
+    b.PrependUOffsetTRelativeSlot(16, evs[0], 0)
+    b.PrependUOffsetTRelativeSlot(15, evs[1], 0)
+    b.PrependUOffsetTRelativeSlot(14, evs[2], 0)
+    b.PrependUOffsetTRelativeSlot(13, evs[3], 0)
+    b.PrependUOffsetTRelativeSlot(12, sg_f12, 0)
+    b.PrependUOffsetTRelativeSlot(10, sg_f10, 0)
+    b.PrependUOffsetTRelativeSlot(9, evs[4], 0)
+    b.PrependUOffsetTRelativeSlot(8, evs[5], 0)
+    b.PrependUOffsetTRelativeSlot(7, sg_f7, 0)
+    b.PrependUOffsetTRelativeSlot(6, evs[6], 0)
+    b.PrependUOffsetTRelativeSlot(4, sg_f4, 0)
+    b.PrependUOffsetTRelativeSlot(3, sg_f3, 0)
+    b.PrependUOffsetTRelativeSlot(2, sg_f2, 0)
+    b.PrependUOffsetTRelativeSlot(1, nvec, 0)
+    b.PrependUOffsetTRelativeSlot(0, tvec, 0)
+    sg = b.EndObject()
+    b.StartVector(4, 1, 4)
+    b.PrependUOffsetTRelative(sg)
+    return b.EndVector()
+
+
+def _build_cpu_body(n_inputs, ops=None):
+    n = n_inputs
+    n_adds = n - 1
+    ins, outp = _cpu_io(n)
+    idx = _tensor_indices(n, ins, outp, n_adds)
+    mem = _cpu_mem_offsets(n)
+    b = flatbuffers.Builder(65536)
+    noffs = _build_cpu_nodes(b, n, ins, outp, n_adds, idx, ops)
+    toffs = _build_cpu_tensors(b, n, ins, outp, n_adds, idx, mem)
+    sg_vec = _build_cpu_subgraph(b, toffs, noffs, n, ins, outp, idx)
+
+    s_target = _str(b, "RKNPU v2")
+    s_toolkit = _str(b, "2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16))")
+    s_platform = _str(b, "rk3588")
+    s_framework = _str(b, "ONNX")
+    import json
+    dtype_in = {nm: {"dtype": "bool", "layout": "UNDEFINED"} for nm in ins}
+    dtype_out = {outp: {"dtype": "bool", "layout": "NCHW"}}
+    root_f12 = _str(b, json.dumps(dtype_in, separators=(", ", ": ")))
+    root_f13 = _str(b, json.dumps(dtype_out, separators=(", ", ": ")))
+    root_f14 = _vec_u8(b, b"0")
+    root_f15 = _ev(b)
+    root_f16 = _str(b, "static_shape")
+    root_f17 = _ev(b)
+    root_f18 = _ev(b)
+    root_f19 = _u64_table2(b, 192 + (n - 2) * 64, 256 + (n - 2) * 64)
+    root_ev3 = _str(b, _cpu_root_attrs(n))
+    root_ev11 = _str(b, "")
+    b.StartObject(22)
+    b.PrependUint32Slot(21, 1, 0)
+    b.PrependUint32Slot(20, 1, 0)
+    b.PrependUOffsetTRelativeSlot(19, root_f19, 0)
+    b.PrependUOffsetTRelativeSlot(18, root_f18, 0)
+    b.PrependUOffsetTRelativeSlot(17, root_f17, 0)
+    b.PrependUOffsetTRelativeSlot(16, root_f16, 0)
+    b.PrependUOffsetTRelativeSlot(15, root_f15, 0)
+    b.PrependUOffsetTRelativeSlot(14, root_f14, 0)
+    b.PrependUOffsetTRelativeSlot(13, root_f13, 0)
+    b.PrependUOffsetTRelativeSlot(12, root_f12, 0)
+    b.PrependUOffsetTRelativeSlot(11, root_ev11, 0)
+    b.PrependUint8Slot(10, 2, 0)
+    b.PrependUOffsetTRelativeSlot(9, s_framework, 0)
+    b.PrependUOffsetTRelativeSlot(8, s_platform, 0)
+    b.PrependUOffsetTRelativeSlot(7, s_toolkit, 0)
+    b.PrependUint32Slot(6, 20302, 0)
+    b.PrependUOffsetTRelativeSlot(3, root_ev3, 0)
+    b.PrependUOffsetTRelativeSlot(2, sg_vec, 0)
+    b.PrependUOffsetTRelativeSlot(1, s_target, 0)
+    b.PrependUint32Slot(0, 6, 0)
+    root = b.EndObject()
+    b.Finish(root, b"RKNN")
+    fb = bytearray(b.Output())
+    fb_len = len(fb)
+
+    rc_word_off = (HEADER_SIZE + fb_len) // 4
+    rc_raw = rc_template_gen.build_template(n, ops=ops, rc_word_off=rc_word_off)
+    taskdesc = _taskdesc_cpu(n, rc_word_off=rc_word_off)
+    full = fb + rc_raw + taskdesc
+    rc_len = len(rc_raw)
+    fb_len = len(fb)
+
+    rc_target = _rc_target_offset(rc_raw, n)
+    root_rt = struct.unpack_from("<I", full, 0)[0]
+    for field_idx, offset in [(20, rc_target),
+                              (21, rc_len + len(taskdesc) - 8)]:
+        ab = _fb_field_abs(full, root_rt, field_idx)
+        struct.pack_into("<I", full, ab, fb_len + offset - ab)
+
+    return bytes(full[:fb_len]), bytes(full[fb_len:])
+
+
+def _make_trailer(rows, cols, n_inputs, body=None):
     import json
     ins, outp = _io(n_inputs)
+    if body is not None and len(body) > 100:
+        try:
+            ba = bytearray(body)
+            positions = _fb_tensor_positions(ba)
+            if len(positions) > 1:
+                first_name = _fb_string(ba, positions[1], 5)
+                if first_name and first_name.startswith("a_rs"):
+                    ins, outp = _cpu_io(n_inputs)
+        except Exception:
+            pass
     norm_tensor = []
     for i, nm in enumerate(ins + [outp]):
         norm_tensor.append({
@@ -1213,7 +1612,7 @@ def _make_trailer(rows, cols, n_inputs):
 
 
 def assemble_rknn(body, rows, cols, n_inputs):
-    trailer = _make_trailer(rows, cols, n_inputs)
+    trailer = _make_trailer(rows, cols, n_inputs, body)
     h = bytearray(HEADER_SIZE)
     h[0:4] = b"RKNN"
     struct.pack_into("<Q", h, 0x08, 6)
@@ -1257,6 +1656,11 @@ def build_body_scratch(N, n_inputs):
 
 
 def _build_body_scratch_flatbuffers(N, n_inputs, ops=None):
+    n_adds_check = max(1, n_inputs - 1)
+    op_names = rc_template_gen._normalize_ops(n_adds_check, ops)
+    if op_names and all(rc_template_gen.is_cpu_op(o) for o in op_names):
+        fb_part, rc_part = _build_cpu_body(n_inputs, ops)
+        return fb_part + rc_part
     min_ops = max(1, n_inputs - 1)
     n_ops = len(ops) if ops and len(ops) >= min_ops else min_ops
     is_multiop = n_ops > n_inputs - 1

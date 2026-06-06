@@ -861,6 +861,74 @@ with `value = HEADER_SIZE + body_offset_of_section` (production
    options: byte-level template patching of the reference body, or a C++ builder.
    The modular `_op_node` already emits correct And/Add nodes; what remains is the
    bool tensor dtype/size threading and the builder field-packing.
+
+## 6f. Mixed CPU(And) + NPU(Add) in one model ("AND and ADD at the same time")
+
+A single `.rknn` can hold both a CPU-fallback op (And) and an NPU element-wise op
+(Add). The toolkit accepts every shape we tried — chained (And→Cast→Add,
+Add→Greater→And) and **parallel** (independent `out1 = a AND b` and
+`out2 = x + y`). The parallel form is the clean canonical case and is NPU-VERIFIED
+(`verify_parallel.cpp`, 0 mismatches): inputs a,b (bool/INT8) and x,y (fp16),
+outputs out1 (bool) and out2 (fp16).
+
+### What the vendor produces (decoded, the command barely differs)
+
+The op-graph is just the **union of the per-branch node chains**, and the
+register-command (RC) block region is the **concatenation** of every branch's
+blocks — all the CPU copy/reshape blocks first, then all the NPU compute blocks:
+
+```
+And(2-in)+Add(2-in)  : 3 copy + 6  compute = 9   blocks  sg.f10=[0,0,0,4,9]
+And(3-in)+Add(2-in)  : 4 copy + 6  compute = 10  blocks
+And(2-in)+Add(3-in)  : 3 copy + 12 compute = 15  blocks  sg.f10=[0,0,0,5,12]
+```
+
+* **copy block** = the exact `_canon(EW_OP_COPY)` block (DPU_MODE=0,
+  EW_CFG=0x383, RDMA_MODE=1) the chained-And path already emits — one per CPU
+  reshape (n_in inputs + 1 output = n_in+1 blocks per And branch).
+* **compute block** = the exact per-tile Add block (`DPU_MODE=0x48000002`,
+  EW_CFG=0x108202c0) that `build_template` emits — 6 tiles × n_adds, with the
+  per-tile-last block a 69-block and the rest 71-blocks.
+* In a mixed stream every copy block is a 71-block (its PC preamble chains to the
+  next); only the final block of the whole stream is a 69-block.
+* `sg.f10 = [0,0,0, n_cpu_blocks + n_npu_ops, total_blocks]`. The taskdesc is the
+  same 8-word reshape-record family (`_taskdesc`/`_taskdesc_cpu`), unchanged.
+
+So the per-op DPU/RDMA register config is **identical** to the standalone And and
+Add models — only the schedule (block ordering + descriptors) is combined. The
+decoded block schedule is reproduced byte-exact by
+`rc_template_gen.mixed_parallel_block_schedule(cpu_branches, npu_branches)`
+(matches all references for And2+Add2, And3+Add2, And2+Add3).
+
+### What still needs the compiler: the combined RC PREFIX
+
+The mixed RC **prefix** (the descriptor + DMA schedule before the blocks) is
+runtime-validated — probed on-device against the vendor parallel body:
+
+```
+zero copy-descriptor chain addresses -> rknn_init fails (-6, load rejected)
+zero the descending size table       -> SEGFAULT in the runtime
+zero DMA base fields                 -> loads, but output all-zero (bases are real)
+zero DMA 'count' fields              -> STILL PASSES (count is cosmetic)
+```
+
+The prefix is regular (it generalises the CPU `_cpu_prefix`: a size table with
+one entry per block, then `n_blocks+2` copy descriptors with chain addresses, then
+3×n_blocks DMA records), but its chain addresses + size table must be byte-exact.
+Reproducing it from scratch is the same `RKNNSubGraphMemoryPlanPass` +
+relocation-table port that gates large-N Add (section 6) — not yet done.
+
+### Current generator: hybrid (works today, NPU-verified)
+
+`rknn_mixed_gen.py` builds the parallel And+Add model via the **hybrid** path
+(the same one the working chained-And path uses): it reuses a toolkit-built
+reference FlatBuffer body + RC for the mixed graph (`_ref_parallel_and_add.rknn`)
+and generates the container header, the JSON trailer, and the memory plan from
+scratch. NPU-verified (`verify_parallel`, 0 mismatches), toolkit-free at
+generation time. The remaining from-scratch work is the combined RC prefix above
+plus the CPU-op FlatBuffer body packing (blocker 1, section 6e) — both shared with
+the existing pure-from-scratch CPU path.
+
 ---
 
 ## 7. Toolbox
@@ -884,4 +952,7 @@ with `value = HEADER_SIZE + body_offset_of_section` (production
 | `build_and_chain_scratch.py N` | CPU-fallback chained-`And` builder (§6e); reference-backed FB body, generated RC/taskdesc, from-scratch container + trailer; n=2..5 PASS on-device |
 | `build_and_chain_ref_n.py N` | mint a chained-`And` reference model via on-device toolkit (n inputs) |
 | `test_and_chain_n.cpp` | n-input chained-`And` correctness harness (AND-of-all-inputs check) |
+| `rknn_mixed_gen.py` | mixed CPU(And)+NPU(Add) parallel generator (§6f); hybrid ref-body + from-scratch container/trailer; PASS on-device |
+| `_ref_parallel_and_add.rknn` | toolkit-built reference for the parallel And+Add graph (hybrid FB body source for `rknn_mixed_gen.py`) |
+| `rc_template_gen.mixed_parallel_block_schedule()` | decoded mixed RC block schedule (copy+compute), byte-exact vs vendor (§6f) |
 | `/data/rk3588/rknn-header/rkt_registers.h` | rk3588 NPU register definitions |

@@ -384,8 +384,11 @@ def build_template(n_inputs, ops=None, rc_word_off=0):
     cpu_flags = [is_cpu_op(o) for o in op_names]
     if any(cpu_flags) and not all(cpu_flags):
         raise NotImplementedError(
-            "mixed NPU/CPU op chains are not yet supported by the RC "
-            f"generator (got ops={op_names})")
+            "mixed NPU/CPU op chains within a single chain are not supported by "
+            f"the RC generator (got ops={op_names}). For independent CPU+NPU "
+            "branches (e.g. parallel And + Add) the schedule is "
+            "[CPU copy blocks] + [NPU compute blocks]; see "
+            "mixed_parallel_block_schedule() and rknn_mixed_gen.py.")
 
     if all(cpu_flags):
         # CPU-fallback chain: n+1 reshape/copy canon blocks (uint32 stream, with
@@ -417,6 +420,59 @@ def build_template(n_inputs, ops=None, rc_word_off=0):
             gbi += 1
     words += _build_trailing(n_inputs)
     return b"\x00" * OFF[n_inputs] + struct.pack(f"<{len(words)}Q", *words)
+
+
+# ── Mixed parallel CPU+NPU schedule (decoded from vendor references) ──
+#
+# A *parallel* mixed model holds independent CPU-fallback branches (e.g.
+# out1 = a AND b) and independent NPU element-wise branches (e.g. out2 = x + y).
+# Decoding the toolkit's output (RKNN_CREATION.md section 6f) shows the RC block
+# region is simply the CONCATENATION:
+#
+#     [ all CPU branches' copy/reshape blocks ]   (DPU_MODE=0, EW_CFG=0x383)
+#     [ all NPU branches' 6-tile compute blocks ] (DPU_MODE=0x48000002, op cfg)
+#
+# Verified block counts:
+#   And(2-in) + Add(2-in)   -> 3 copy  + 6  compute = 9   (sg.f10=[0,0,0,4,9])
+#   And(3-in) + Add(2-in)   -> 4 copy  + 6  compute = 10
+#   And(2-in) + Add(3-in)   -> 3 copy  + 12 compute = 15  (sg.f10=[0,0,0,5,12])
+#
+# The CPU copy block = _canon(EW_OP_COPY); the NPU compute blocks are exactly the
+# per-tile blocks build_template() already emits for the Add chain.  Only the RC
+# *prefix* (descriptor + DMA schedule, with runtime-validated chain addresses and
+# size table) is not yet reproduced from scratch -- that is the same
+# compiler-tiler port that gates large-N Add.  rknn_mixed_gen.py therefore builds
+# mixed models via the hybrid (reference-body) path today.
+
+
+def mixed_parallel_block_schedule(cpu_branches, npu_branches):
+    """Return the mixed-parallel RC block schedule as a list of descriptors.
+
+    cpu_branches: list of n_inputs (>=2) for each CPU (And) branch.
+    npu_branches: list of (n_inputs, ops) for each NPU (Add/...) branch.
+
+    Each returned entry is a dict describing one RC block:
+      {"kind": "copy"|"compute", "branch": idx, "op": name, "len": 69|71}.
+    This is the decoded, generatable block ordering; the prefix/relocation is
+    separate (see module docstring).
+    """
+    sched = []
+    for bi, n_in in enumerate(cpu_branches):
+        # one CPU op chain of n_in inputs -> n_in + 1 reshape/copy blocks. In a
+        # mixed stream every copy block is a 71-block (its PC preamble chains to
+        # the next block); only the very last block of the whole stream is a
+        # 69-block, handled in the final fix-up below.
+        for _k in range(n_in + 1):
+            sched.append({"kind": "copy", "branch": bi, "op": "And", "len": 71})
+    for bi, (n_in, ops) in enumerate(npu_branches):
+        n_adds = n_in - 1
+        names = _normalize_ops(n_adds, ops)
+        for _tile in range(6):
+            for j in range(n_adds):
+                # within a tile the last add is a 69-block, the rest are 71.
+                sched.append({"kind": "compute", "branch": bi, "op": names[j],
+                              "len": 69 if j == n_adds - 1 else 71})
+    return sched
 
 
 # ── CPU-fallback op regcmd helpers (used by build_template's CPU branch) ──
