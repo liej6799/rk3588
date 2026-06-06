@@ -68,7 +68,7 @@ def _model_stats(body, N, n_inputs, n_ops=None):
     return C1, W, n_tiles, len(spans)
 
 
-def generate(rows, cols, out, n_inputs, emit_parts=False, ops=None):
+def generate(rows, cols, out, n_inputs, emit_parts=False, ops=None, dtype="float16"):
     N = rows * cols
     if not (1 <= N <= MAX_N):
         raise SystemExit(f"N={N} out of range 1..{MAX_N} (max {MAX_SURF} surfaces x {SURF_W})")
@@ -76,14 +76,15 @@ def generate(rows, cols, out, n_inputs, emit_parts=False, ops=None):
     if len(ops) < max(1, n_inputs - 1):
         raise SystemExit(f"need at least {n_inputs - 1} ops for {n_inputs} inputs, got {len(ops)}")
 
-    body = rknn_flatbuf.build_body(N, n_inputs, rows=rows, cols=cols, ops=ops)
+    body = rknn_flatbuf.build_body(N, n_inputs, rows=rows, cols=cols, ops=ops, dtype=dtype)
     data = rknn_flatbuf.assemble_rknn(body, rows, cols, n_inputs)
     Path(out).write_bytes(data)
 
     C1, W, n_tiles, n_blocks = _model_stats(body, N, n_inputs, len(ops))
     tile_info = f", {n_tiles} tiles" if n_tiles > 1 else ""
+    dtype_info = "" if dtype == "float16" else f", dtype={dtype}"
     print(f"generated {out}: {rows}x{cols} N={N} ({n_inputs}-input {'+'.join(ops)}, "
-          f"C1={C1} x W={W}, {n_blocks} blocks{tile_info}, toolkit-free)")
+          f"C1={C1} x W={W}, {n_blocks} blocks{tile_info}{dtype_info}, toolkit-free)")
 
     if emit_parts:
         trailer = data[0x40 + len(body):]
@@ -161,6 +162,12 @@ def main():
                     help="element-wise operation applied uniformly")
     ap.add_argument("--ops", type=str, default=None,
                     help="comma-separated per-op list, e.g. Mul,Add,Sub")
+    ap.add_argument("--dtype", choices=sorted(rknn_flatbuf.DTYPES), default="float16",
+                    help="tensor data type: float16 (NPU fp16 compute, default), "
+                         "float32 (converted to/from fp16), int8 (exact integer "
+                         "element-wise), or bool (RKNN_TENSOR_BOOL, int8-style: "
+                         "Add~OR but Mul is not boolean AND; use a CPU-fallback And "
+                         "model for true logical ops)")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--emit-parts", action="store_true")
     ap.add_argument("--verify", action="store_true")
@@ -177,7 +184,8 @@ def main():
                              "Re-run with --allow-toolkit.")
         generate_via_toolkit(args.rows, args.cols, args.out, args.inputs, ops)
     else:
-        generate(args.rows, args.cols, args.out, args.inputs, args.emit_parts, ops)
+        generate(args.rows, args.cols, args.out, args.inputs, args.emit_parts, ops,
+                 args.dtype)
 
     if args.verify and verify(args.out, ops) is False:
         sys.exit(1)

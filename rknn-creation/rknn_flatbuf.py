@@ -22,6 +22,58 @@ HEADER_SIZE = 0x40
 MAX_INPUTS = 64
 SUPPORTED_INPUTS = range(2, MAX_INPUTS + 1)
 
+# dtype -> {internal FlatBuffer TensorType enum stored in tensor field f0 (NOT the
+# public rknn_tensor_type enum), bytes per element of the EXTERNAL I/O buffer,
+# root dtype string used in f12/f13 dtype_in/out + attrs}.
+#
+# Coverage on the NPU element-wise (DPU) path was established empirically against
+# the vendor librknnrt.so on rk3588 (RKNN_CREATION.md 6g):
+#
+#   dtype     f0   bytes  status (Add/Sub/Div verified, mismatches=0)
+#   float16   10     2    native DPU fp16 compute            -- WORKS
+#   float32   10     4    runtime converts fp32<->fp16        -- WORKS (fp16 precision)
+#   int8       3     1    DPU int8 element-wise               -- WORKS (exact integer)
+#   bool       3     1    same enum as int8; Add~OR, Mul!=AND -- WORKS (int8 arithmetic)
+#
+# Unsupported on THIS path/runtime (kept out of DTYPES so they raise clearly):
+#   uint8   -> input normalizes but OUTPUT uint8 dtype is unsupported by the EW path
+#   int16/int32/int64 -> recognized input dtypes, but their native NC1HWC2 pack uses
+#       C2=4 (not 8) so the fp16 RC template's working-buffer geometry mis-computes;
+#       a per-width RC template + memory plan would be needed (compiler-tiler work)
+#   uint16/uint32/int4/bfloat16 -> not recognized by this librknnrt's dtype parser
+#       (report UNKNOW(12) regardless of spelling)
+DTYPES = {
+    "float16": {"fb_type": 10, "elem_bytes": 2, "str": "float16"},
+    "float32": {"fb_type": 10, "elem_bytes": 4, "str": "float32"},
+    "int8": {"fb_type": 3, "elem_bytes": 1, "str": "int8"},
+    "bool": {"fb_type": 3, "elem_bytes": 1, "str": "bool"},
+}
+
+# Dtypes the runtime knows but which do NOT work on the toolkit-free EW path; we
+# name them so the error message can be specific rather than a generic KeyError.
+_DTYPE_KNOWN_UNSUPPORTED = {
+    "uint8": "output uint8 dtype is unsupported by the element-wise path",
+    "int16": "needs C2=4 native pack + per-width RC template (compiler-tiler work)",
+    "int32": "needs C2=4 native pack + per-width RC template (compiler-tiler work)",
+    "int64": "needs C2=4 native pack + per-width RC template (compiler-tiler work)",
+    "uint16": "not recognized by this librknnrt dtype parser",
+    "uint32": "not recognized by this librknnrt dtype parser",
+    "int4": "not recognized by this librknnrt dtype parser",
+    "bfloat16": "not recognized by this librknnrt dtype parser",
+}
+
+
+def _resolve_dtype(dtype):
+    if dtype in DTYPES:
+        return DTYPES[dtype]
+    if dtype in _DTYPE_KNOWN_UNSUPPORTED:
+        raise NotImplementedError(
+            f"dtype {dtype!r} is not supported on the toolkit-free NPU "
+            f"element-wise path: {_DTYPE_KNOWN_UNSUPPORTED[dtype]}. "
+            f"Supported: {sorted(DTYPES)}.")
+    raise ValueError(f"unknown dtype {dtype!r}; supported: {sorted(DTYPES)}")
+
+
 _DPU = 0x1001
 _RDMA = 0x2001
 _TARGETS = {0x0101, 0x0201, 0x0801, _DPU, _RDMA, 0x4001,
@@ -314,8 +366,8 @@ def _patch_tiles(body, N, n_inputs):
         struct.pack_into("<Q", body, idx * 8, val)
 
 
-def build_body(N, n_inputs, rows=None, cols=None, ops=None):
-    return _build_body_scratch_flatbuffers(N, n_inputs, ops)
+def build_body(N, n_inputs, rows=None, cols=None, ops=None, dtype="float16"):
+    return _build_body_scratch_flatbuffers(N, n_inputs, ops, dtype)
 
 
 def surface_split(N):
@@ -467,30 +519,36 @@ def _u64_table2(b, a, c):
     return b.EndObject()
 
 
-def _root_attrs(n_inputs, N):
+def _root_attrs(n_inputs, N, dtype="float16"):
     ins, outp = _io(n_inputs)
     side = math.isqrt(N)
     shape = [side, side] if side * side == N else [1, N]
+    # The attrs "dtype" is the model input dtype (float32 host buffer for the fp16
+    # path); the quant_tab dtype is the on-device tensor dtype. For bool both are
+    # bool. These strings are cosmetic to the runtime (it reads root f12/f13), but
+    # we keep them consistent for tooling/round-trip fidelity.
+    in_dtype = "bool" if dtype == "bool" else "float32"
+    out_dtype = "bool" if dtype == "bool" else "float16"
     attrs = {}
     quant = {}
     for i, nm in enumerate(ins):
         attrs[nm] = {
             "idx": i, "shape": shape, "layout": "nchw", "layout_ori": "nchw",
             "is_output": False, "range": [0, 1], "origin_dynamic": False,
-            "dtype": "float32", "mean": [0] * 10, "std": [1] * 10,
+            "dtype": in_dtype, "mean": [0] * 10, "std": [1] * 10,
             "rgb2bgr": False,
         }
         quant[nm] = {
-            "dtype": "float32", "qmethod": "", "qtype": "", "min": [],
+            "dtype": in_dtype, "qmethod": "", "qtype": "", "min": [],
             "max": [], "scale": [], "zero_point": [], "name": nm,
             "shape": shape,
         }
     attrs[outp] = {
-        "is_output": True, "idx": 0, "shape": shape, "dtype": "float32",
+        "is_output": True, "idx": 0, "shape": shape, "dtype": in_dtype,
         "layout": "nchw",
     }
     quant[outp] = {
-        "dtype": "float16", "qmethod": "", "qtype": "", "min": [],
+        "dtype": out_dtype, "qmethod": "", "qtype": "", "min": [],
         "max": [], "scale": [], "zero_point": [], "name": outp,
         "shape": shape,
     }
@@ -725,15 +783,17 @@ def _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp, n_external=None):
     b.PrependUOffsetTRelative(sg)
     return b.EndVector()
 
-def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inputs=None):
+def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inputs=None,
+                dtype="float16"):
     rc_n = n_rc_inputs if n_rc_inputs is not None else n_inputs
     ins, outp = _io(rc_n)
+    dstr = _resolve_dtype(dtype)["str"]
     s_target = _str(b, "RKNPU v2")
     s_toolkit = _str(b, "2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16))")
     s_platform = _str(b, "rk3588")
     s_framework = _str(b, "ONNX")
-    dtype_in = {nm: {"dtype": "float16", "layout": "UNDEFINED"} for nm in ins}
-    dtype_out = {outp: {"dtype": "float16", "layout": "NCHW"}}
+    dtype_in = {nm: {"dtype": dstr, "layout": "UNDEFINED"} for nm in ins}
+    dtype_out = {outp: {"dtype": dstr, "layout": "NCHW"}}
     import json
     root_f12 = _str(b, json.dumps(dtype_in, separators=(", ", ": ")))
     root_f13 = _str(b, json.dumps(dtype_out, separators=(", ", ": ")))
@@ -743,7 +803,7 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inpu
     root_f17 = _ev(b)
     root_f18 = _ev(b)
     root_f19 = _u64_table2(b, 192 + (rc_n - 2) * 64, 1472 + (rc_n - 2) * 320)
-    root_ev3 = _str(b, _root_attrs(rc_n, N))
+    root_ev3 = _str(b, _root_attrs(rc_n, N, dtype))
     root_ev11 = _str(b, "")
     b.StartObject(22)
     b.PrependUint32Slot(21, 1, 0)
@@ -1655,7 +1715,7 @@ def build_body_scratch(N, n_inputs):
     return bytes(body)
 
 
-def _build_body_scratch_flatbuffers(N, n_inputs, ops=None):
+def _build_body_scratch_flatbuffers(N, n_inputs, ops=None, dtype="float16"):
     n_adds_check = max(1, n_inputs - 1)
     op_names = rc_template_gen._normalize_ops(n_adds_check, ops)
     if op_names and all(rc_template_gen.is_cpu_op(o) for o in op_names):
@@ -1711,5 +1771,25 @@ def _build_body_scratch_flatbuffers(N, n_inputs, ops=None):
     n_sg2 = n_external if is_multiop else n_virtual
     sg = _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp, n_sg2)
     fb_bytes, rc_bytes = _build_root(b, sg, n_adds, C1, W, tiles, N, n_inputs, ops,
-                                     n_rc_inputs=n_virtual)
-    return fb_bytes + rc_bytes
+                                     n_rc_inputs=n_virtual, dtype=dtype)
+    body = bytearray(fb_bytes + rc_bytes)
+    _patch_tensor_dtype(body, dtype)
+    return bytes(body)
+
+
+def _patch_tensor_dtype(body, dtype):
+    """Set every data tensor's f0 dtype enum to the requested dtype.
+
+    Only the FlatBuffer-prefix tensor tables carry f0; the regcmd/task tensors
+    keep their command kind (13). Data tensors are the ones whose f0 currently
+    holds the float16 enum (10). For dtypes whose internal tensor class IS fp16
+    (float16, float32 — the runtime converts on I/O) this is a no-op.
+    """
+    fb_type = _resolve_dtype(dtype)["fb_type"]
+    fp16_type = DTYPES["float16"]["fb_type"]
+    if fb_type == fp16_type:
+        return
+    for tp in _fb_tensor_positions(body):
+        ab = _fb_field_abs(body, tp, 0)
+        if ab is not None and body[ab] == fp16_type:
+            body[ab] = fb_type

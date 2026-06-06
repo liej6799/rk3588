@@ -931,12 +931,103 @@ the existing pure-from-scratch CPU path.
 
 ---
 
+## 6g. Multi-dtype support on the NPU element-wise path (`build_body(dtype=...)`)
+
+The pure-FlatBuffers element-wise generator now emits multiple tensor data types
+in addition to fp16, fully from `rknn_flatbuf.py` + `rc_template_gen.py` (no
+toolkit). `build_body(N, n_inputs, ops=..., dtype=...)` and `rknn_add_gen.py
+--dtype {float16,float32,int8,bool}` build models the **vendor `librknnrt.so`
+loads, runs, and reports with the right `rknn_tensor_type`** (`query_attr`).
+
+### Per-dtype status (NPU-verified against librknnrt.so, Add mismatches=0)
+
+| dtype | body f0 | I/O bytes | NPU status |
+|-------|---------|-----------|------------|
+| `float16` | 10 | 2 | native DPU fp16 — **WORKS** |
+| `float32` | 10 | 4 | runtime converts fp32↔fp16 — **WORKS** (fp16 precision) |
+| `int8` | 3 | 1 | DPU int8 element-wise — **WORKS** (exact integer) |
+| `bool` | 3 | 1 | int8 enum; `Add≈OR`, `Mul≠AND` — **WORKS** (int8 arithmetic) |
+| `uint8` | — | 1 | input normalizes but **output uint8 dtype unsupported** by EW path |
+| `int16`/`int32`/`int64` | 4/6/8 | 2/4/8 | recognized input, but native pack is **C2=4** not 8 → the fp16 RC template mis-computes; needs a per-width RC template + memory plan |
+| `uint16`/`uint32`/`int4`/`bfloat16` | — | — | **not recognized** by this librknnrt's dtype string parser (report `UNKNOW(12)`) |
+
+The 4 working dtypes are in `DTYPES`; the rest are listed in
+`_DTYPE_KNOWN_UNSUPPORTED` so `build_body` raises a specific
+`NotImplementedError` (and the CLI `--dtype` choice list shows only the working
+set). Key decoded facts (below) were established by sweeping `f0` enum and
+dtype-string candidates against the real runtime, not guessed.
+
+The `int32` reference (`rknn-reg/int/int32add.rknn`) confirms the C2=4 native
+pack: its working tensors are `[1,1,1,W,4]` (4 fp16-byte lanes), versus fp16's
+`[1,1,1,W,8]`. Supporting int16/32/64 on the NPU therefore requires emitting a
+width-specific RC block (different `DATA_CUBE_CHANNEL`/stride) and memory plan —
+the same compiler-tiler territory as large-N Add — and is left as future work.
+
+### Where the dtype lives (decoded)
+
+* **Reported dtype = root fields `f12`/`f13`** (the `dtype_in`/`dtype_out` JSON
+  strings). Proven by sweep: patching only the per-tensor `f0` enum, or only the
+  root `f3` attrs JSON, leaves the runtime reporting FP16; only changing
+  `f12`/`f13` makes `rknn_query` return the new type.
+* **Per-tensor `f0` = internal FlatBuffer `TensorType` enum** (decoded via
+  `extract_rknn_build_queue.tensor_info`): fp16=`10`, int8/bool=`3`, int32=`6`.
+  This is *not* the public `rknn_tensor_type` (where `BOOL=9`); the body uses its
+  own enum. `DTYPES` maps name -> `{fb_type, elem_bytes, str}` and
+  `_patch_tensor_dtype` rewrites every data tensor's `f0` after the FB is built
+  (a no-op for fp16/fp32, which share the fp16 internal class).
+
+### Matching f0 to the dtype is mandatory (decoded from the runtime errors)
+
+The body `f0` enum AND the reported dtype string must agree. If they disagree the
+runtime tries to convert on input and fails: e.g. an int8-declared input over an
+fp16-class body raises
+`Normalize does not support for this data type. src type(INT8), dst type fbs::TensorType_FLOAT16`.
+The internal enum names come straight from the library
+(`strings librknnrt.so | grep TensorType_`): FLOAT, FLOAT16, INT8, UINT8, INT16,
+INT64, BOOL, BFLOAT16, TF32. `float32` keeps the fp16 internal class (f0=10)
+because the runtime losslessly normalises fp32↔fp16 at the I/O boundary.
+
+### int8 / bool integer semantics (NPU-verified truth tables)
+
+For 1-byte dtypes the DPU computes **int8-style integer** element-wise (output is
+1 byte/elem; `want_float` converts the raw byte, e.g. Add(1,1)=2.0):
+
+```
+op    (0,0) (0,1) (1,0) (1,1)   matches
+Add     0     1     1     2     integer a+b   (= OR when clamped nonzero)
+Sub     0     0     1     0     integer a-b   (saturates at 0)
+Div     1     0     0     1     integer a/b   (1/1=1, x/0 -> 1, 0/x -> 0)
+Mul     0     0     0     0     BROKEN (1*1 should be 1)  -- Mul cfg is fp16-only
+```
+
+So **Add/Sub/Div are valid 8-bit integer element-wise ops** (`Add ≈ logical OR`
+for bool), but **Mul does not yield logical AND** — its `EW_CFG=0x108003c4`
+expects fp16 operand encoding, so integer-byte multiply mis-computes. For genuine
+logical ops on bool data, use the CPU-fallback `And` chain (§6e), which the
+runtime reports as `BOOL` and executes correctly on a CPU kernel.
+
+### Status
+
+* `build_body` → `_build_root` thread `dtype`; `_resolve_dtype` validates it,
+  `_root_attrs` emits consistent attrs/quant dtype, `_patch_tensor_dtype` sets the
+  body `f0` (no-op for fp16/fp32). fp16 remains the default and byte-unchanged
+  (regression: 10x10 / 20x20 / 32x32 / 1x2048 Add still 0 mismatches).
+* Verified end-to-end on the NPU: **float16, float32, int8, bool** (n=2 and n=3
+  chains, 1x4 / 10x10). Unsupported dtypes raise a specific `NotImplementedError`.
+* Tools added: `query_attr.cpp` (dump runtime-reported tensor dtype/size),
+  `verify_bool.cpp` (bool truth tables), `verify_int.cpp` (integer Add check).
+
+---
+
 ## 7. Toolbox
 
 | file | role |
 |------|------|
-| `rknn_add_gen.py` | toolkit-free CLI generator (`build_body` + trailer -> `.rknn`), `--verify` uses `rknn_verify_n` |
-| `rknn_flatbuf.py` | body builder: `build_body` = pure FlatBuffers (2-64 inputs, no template FB skeleton); algorithmic generators for tensor metadata, RC templates, alignment, and task descriptors; `build_body_scratch` = legacy template-splice reference path |
+| `rknn_add_gen.py` | toolkit-free CLI generator (`build_body` + trailer -> `.rknn`), `--verify` uses `rknn_verify_n`, `--dtype {float16,float32,int8,bool}` (§6g) |
+| `rknn_flatbuf.py` | body builder: `build_body(...,dtype=)` = pure FlatBuffers (2-64 inputs; fp16/fp32/int8/bool, no template FB skeleton); `DTYPES` + `_DTYPE_KNOWN_UNSUPPORTED` + `_resolve_dtype`/`_patch_tensor_dtype`; algorithmic generators for tensor metadata, RC templates, alignment, and task descriptors; `build_body_scratch` = legacy template-splice reference path |
+| `query_attr.cpp` | dump the vendor runtime's reported per-tensor dtype/size/fmt (§6g) |
+| `verify_bool.cpp` | feed/read 1-byte bool buffers; classify NPU bool op semantics (§6g) |
+| `verify_int.cpp` | integer-dtype element-wise Add correctness harness (§6g) |
 | `_body_add*_10x10.body` | legacy raw reference bodies from reverse-engineering; not used by production `build_body()` |
 | `_rc_add*.bin` | legacy extracted regcmd blobs from reverse-engineering; not used by production `build_body()` |
 | `decode_embedded_bodies.py` | decode a `.body` into FB-prefix / regcmd-blocks / taskdesc-tail |

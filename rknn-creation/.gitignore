@@ -18,3 +18,6 @@ rknn_verify_n
 verify_and
 verify_and2_add1
 verify_parallel
+verify_bool
+verify_int
+query_attr
