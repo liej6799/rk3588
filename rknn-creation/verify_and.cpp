@@ -31,16 +31,18 @@ int main(int argc, char** argv) {
         printf("  out[%u] name=%s n_elems=%u type=%d fmt=%d\n", i, a.name, a.n_elems, a.type, a.fmt);
     }
 
-    // a=[1,0,1,0], b=[1,1,0,0] -> AND = [1,0,0,0]
-    int8_t a[4] = {1, 0, 1, 0};
-    int8_t b[4] = {1, 1, 0, 0};
+    // a=[1,0,1,0], b=[1,1,0,0], rest=[1,1,1,1] -> AND = [1,0,0,0]
+    int8_t in_data[64][4];
+    memset(in_data, 1, sizeof(in_data));
+    in_data[0][0]=1; in_data[0][1]=0; in_data[0][2]=1; in_data[0][3]=0;
+    in_data[1][0]=1; in_data[1][1]=1; in_data[1][2]=0; in_data[1][3]=0;
 
-    rknn_input ins[2]; memset(ins, 0, sizeof(ins));
-    ins[0].index = 0; ins[0].type = RKNN_TENSOR_INT8; ins[0].size = 4;
-    ins[0].fmt = RKNN_TENSOR_NCHW; ins[0].buf = a; ins[0].pass_through = 1;
-    ins[1].index = 1; ins[1].type = RKNN_TENSOR_INT8; ins[1].size = 4;
-    ins[1].fmt = RKNN_TENSOR_NCHW; ins[1].buf = b; ins[1].pass_through = 1;
-    ret = rknn_inputs_set(ctx, 2, ins);
+    rknn_input ins[64]; memset(ins, 0, sizeof(ins));
+    for (uint32_t i = 0; i < io.n_input && i < 64; i++) {
+        ins[i].index = i; ins[i].type = RKNN_TENSOR_INT8; ins[i].size = 4;
+        ins[i].fmt = RKNN_TENSOR_NCHW; ins[i].buf = in_data[i]; ins[i].pass_through = 1;
+    }
+    ret = rknn_inputs_set(ctx, io.n_input, ins);
     printf("inputs_set: %d\n", ret);
 
     ret = rknn_run(ctx, NULL);

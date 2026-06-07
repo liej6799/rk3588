@@ -1176,13 +1176,17 @@ def _empty_attrs_table(b):
     return b.EndObject()
 
 
-def _op_node(b, op_num, in_a_idx, in_b_idx, out_idx, op="Add"):
+def _op_node(b, op_num, in_a_idx, in_b_idx, out_idx, op="Add",
+             npu_f10=None, npu_f12=None):
     """Binary op node, modular over NPU element-wise and CPU-fallback ops.
 
     NPU ops (Add/Sub/Mul/Div) carry node field f3 = DPU op-type (2) and the
     NPU geometry vectors. CPU ops (And/...) instead carry field f7 = the runtime
     CPU op-type enum and field f8 = an empty attributes table, with the geometry
     vectors zeroed (the NPU only reshapes; the CPU kernel does the compute).
+
+    npu_f10/npu_f12 override the default NPU geometry vectors (used by the mixed
+    model builder for non-standard tensor shapes like [1,4]).
     """
     cpu = rc_template_gen.is_cpu_op(op)
     op_s = _str(b, op)
@@ -1200,9 +1204,9 @@ def _op_node(b, op_num, in_a_idx, in_b_idx, out_idx, op="Add"):
         f12 = _vec(b, [0, 0, 0, 0, 0, 0, 0, 0, 0])
     else:
         f9 = _ev(b)
-        f10 = _vec(b, [1, 1, 1, 1, 1, 1])
+        f10 = _vec(b, npu_f10 if npu_f10 else [1, 1, 1, 1, 1, 1])
         f11 = _vec(b, [0, 0, 0, 0, 0, 0])
-        f12 = _vec(b, [160, 0, 0, 80, 80, 0, 64, 48, 48])
+        f12 = _vec(b, npu_f12 if npu_f12 else [160, 0, 0, 80, 80, 0, 64, 48, 48])
     b.StartObject(13)
     b.PrependUOffsetTRelativeSlot(12, f12, 0)
     b.PrependUOffsetTRelativeSlot(11, f11, 0)
@@ -1265,7 +1269,7 @@ _CPU_SLOT = 64
 
 
 def _cpu_io(n):
-    return [chr(97 + i) for i in range(n)], "out"
+    return _io_names(n), "out"
 
 
 def _cpu_mem_offsets(n):
@@ -1312,13 +1316,14 @@ def _cpu_ext_input(b, name, f13_val, has_f13):
     return b.EndObject()
 
 
-def _cpu_ext_output(b, name):
+def _cpu_ext_output(b, name, f13=None):
+    f13_val = 2 * _CPU_SLOT if f13 is None else f13
     nm = _str(b, name)
     v3 = _vec(b, [1, 4])
     v4 = _vec(b, [1, 4])
     evs = [_ev(b) for _ in range(9)]
     b.StartObject(18)
-    b.PrependUint32Slot(13, 2 * _CPU_SLOT, 0)
+    b.PrependUint32Slot(13, f13_val, 0)
     b.PrependUint32Slot(12, _CPU_SLOT, 0)
     for i, e in [(17, evs[0]), (16, evs[1]), (15, evs[2]), (11, evs[3]),
                  (10, evs[4]), (9, evs[5]), (8, evs[6]), (7, evs[7]), (6, evs[8])]:
@@ -1618,6 +1623,185 @@ def _build_cpu_body(n_inputs, ops=None):
     return bytes(full[:fb_len]), bytes(full[fb_len:])
 
 
+def _mixed_root_attrs():
+    shape = [1, 4]
+    attrs, quant = {}, {}
+    for i, nm in enumerate(["a", "b"]):
+        attrs[nm] = {"idx": i, "shape": shape, "layout": "nchw", "layout_ori": "nchw",
+                     "is_output": False, "range": [0, 1], "origin_dynamic": False,
+                     "dtype": "bool", "mean": [0] * 4, "std": [1] * 4, "rgb2bgr": False}
+        quant[nm] = {"dtype": "bool", "qmethod": "", "qtype": "", "min": [],
+                     "max": [], "scale": [], "zero_point": [], "name": nm, "shape": shape}
+    for i, nm in enumerate(["x", "y"]):
+        attrs[nm] = {"idx": i + 2, "shape": shape, "layout": "nchw", "layout_ori": "nchw",
+                     "is_output": False, "range": [0, 1], "origin_dynamic": False,
+                     "dtype": "float32", "mean": [0] * 4, "std": [1] * 4, "rgb2bgr": False}
+        quant[nm] = {"dtype": "float16", "qmethod": "", "qtype": "", "min": [],
+                     "max": [], "scale": [], "zero_point": [], "name": nm, "shape": shape}
+    attrs["out1"] = {"is_output": True, "idx": 0, "shape": shape,
+                     "dtype": "bool", "layout": "nchw"}
+    quant["out1"] = {"dtype": "bool", "qmethod": "", "qtype": "", "min": [],
+                     "max": [], "scale": [], "zero_point": [], "name": "out1", "shape": shape}
+    attrs["out2"] = {"is_output": True, "idx": 1, "shape": shape,
+                     "dtype": "float32", "layout": "nchw"}
+    quant["out2"] = {"dtype": "float16", "qmethod": "", "qtype": "", "min": [],
+                     "max": [], "scale": [], "zero_point": [], "name": "out2", "shape": shape}
+    return str({"attrs": attrs, "quant_tab": quant, "dynamic_shapes": {}})
+
+
+_MIXED_NPU_IO_OFF = [0, 0, 32, 0, 32, 48]
+_MIXED_NPU_IO_MASK = [1, 0, 1, 0, 1, 1]
+_MIXED_CPU_SHIFT = 240
+_MIXED_NPU_F10 = [1, 1, 1, 1, 1, 1]
+_MIXED_NPU_F12 = [32, 0, 0, 16, 16, 0, 16, 8, 8]
+
+
+def _build_mixed_and_add_body(cpu_op="And", npu_op="Add"):
+    n_t = 27
+    n_n = 14
+    b = flatbuffers.Builder(65536)
+
+    noffs = [None] * n_n
+    noffs[13] = _cpu_output_node(b, "out2", 24)
+    noffs[12] = _reshape_node(b, "out2-rs", "out2", [22, 6, 23], [24])
+    noffs[11] = _op_node(b, 1, 19, 21, 22, op=npu_op,
+                          npu_f10=_MIXED_NPU_F10, npu_f12=_MIXED_NPU_F12)
+    noffs[10] = _reshape_node(b, "y_rs", "y", [10, 5, 20], [21])
+    noffs[9] = _reshape_node(b, "x_rs", "x", [9, 4, 18], [19])
+    noffs[8] = _cpu_output_node(b, "out1", 17)
+    noffs[7] = _cpu_reshape_node(b, "out1-rs", "out1", [15, 3, 16], [17])
+    noffs[6] = _op_node(b, 1, 12, 14, 15, op=cpu_op)
+    noffs[5] = _cpu_reshape_node(b, "b_rs", "b", [8, 2, 13], [14])
+    noffs[4] = _cpu_reshape_node(b, "a_rs", "a", [7, 1, 11], [12])
+    noffs[3] = _input_node(b, "y", 10)
+    noffs[2] = _input_node(b, "x", 9)
+    noffs[1] = _input_node(b, "b", 8)
+    noffs[0] = _input_node(b, "a", 7)
+
+    toffs = [None] * n_t
+    toffs[26] = _cmd_tensor(b, "task", f2=10, f18=8)
+    toffs[25] = _cmd_tensor(b, "regcmd", f2=9, f18=7)
+    toffs[24] = _ext_tensor(b, "out2", [1, 4], 64, f13=128, f2=2)
+    toffs[23] = _exsec_tensor(b, "out2-rs_exSecondary", [1, 1, 1, 4], 1, 64, f1=2)
+    toffs[22] = _rs_tensor(b, "out2-rs", [1, 1, 1, 4, 8], [1, 1, 1, 4], 64, 0,
+                            has_f13=False)
+    toffs[21] = _rs_tensor(b, "y_rs", [1, 1, 1, 4, 8], [1, 1, 1, 4], 64, 128,
+                            has_f13=True)
+    toffs[20] = _exsec_tensor(b, "y_exSecondary", [1, 4], 1, None, f1=None)
+    toffs[19] = _rs_tensor(b, "x_rs", [1, 1, 1, 4, 8], [1, 1, 1, 4], 64, 64,
+                            has_f13=True)
+    toffs[18] = _exsec_tensor(b, "x_exSecondary", [1, 4], 1, None, f1=None)
+    toffs[17] = _cpu_ext_output(b, "out1", f13=256)
+    toffs[16] = _cpu_exsec(b, "out1-rs_exSecondary", True, 64, True)
+    toffs[15] = _cpu_rs(b, "out1-rs", None, False)
+    toffs[14] = _cpu_rs(b, "b_rs", 256, True)
+    toffs[13] = _cpu_exsec(b, "b_exSecondary", False, None, False)
+    toffs[12] = _cpu_rs(b, "a_rs", 320, True)
+    toffs[11] = _cpu_exsec(b, "a_exSecondary", False, 256, True)
+    toffs[10] = _ext_tensor(b, "y", [1, 4], 8, f13=192, f2=1)
+    toffs[9] = _ext_tensor(b, "x", [1, 4], 8, f13=128, f2=1)
+    toffs[8] = _cpu_ext_input(b, "b", 64, True)
+    toffs[7] = _cpu_ext_input(b, "a", None, False)
+    toffs[6] = _rsi1_tensor(b, "out2-rs_i1", 7, 16)
+    toffs[5] = _rsi1_tensor(b, "y_rs_i1", 6, 32)
+    toffs[4] = _rsi1_tensor(b, "x_rs_i1", 5, 32)
+    toffs[3] = _rsi1_tensor(b, "out1-rs_i1", 4, 16)
+    toffs[2] = _rsi1_tensor(b, "b_rs_i1", 3, 32)
+    toffs[1] = _rsi1_tensor(b, "a_rs_i1", 2, 32)
+    toffs[0] = _empty_tensor(b)
+
+    tvec = _ovec(b, toffs)
+    nvec = _ovec(b, noffs)
+    sg_f4 = _ovec(b, [
+        _vec_table3(b, [0] * 10, [0x3f800000] * 10, list(range(10)))
+        for _ in range(4)
+    ])
+
+    cpu_f7 = [
+        _cpu_sg_f7_entry(b, "a", 55),
+        _cpu_sg_f7_entry(b, "a_rs", 5),
+        _cpu_sg_f7_entry(b, "b", 135),
+        _cpu_sg_f7_entry(b, "b_rs", 85),
+        _cpu_sg_f7_entry(b, "out1", 165),
+        _cpu_sg_f7_entry(b, "out1-rs", 215),
+    ]
+    npu_bases = {"out2-rs": 5, "x_rs": 55, "y_rs": 61}
+    npu_f7 = []
+    for nm, base in npu_bases.items():
+        pairs = [(_MIXED_NPU_IO_OFF[i], base + i * 80 + _MIXED_CPU_SHIFT)
+                 for i in range(6)]
+        npu_f7.append(_str_vec_table3(b, nm, pairs, list(_MIXED_NPU_IO_MASK)))
+    sg_f7 = _ovec(b, cpu_f7 + npu_f7)
+    sg_f10 = _vec(b, [0, 0, 0, 4, 9])
+    sg_f12 = _ovec(b, [_str_scalar_table2(b, "out1", 3),
+                        _str_scalar_table2(b, "out2", 4)])
+    sg_f2 = _vec(b, [7, 8, 9, 10])
+    sg_f3 = _vec(b, [17, 24])
+    evs = [_ev(b) for _ in range(7)]
+
+    b.StartObject(17)
+    b.PrependUOffsetTRelativeSlot(16, evs[0], 0)
+    b.PrependUOffsetTRelativeSlot(15, evs[1], 0)
+    b.PrependUOffsetTRelativeSlot(14, evs[2], 0)
+    b.PrependUOffsetTRelativeSlot(13, evs[3], 0)
+    b.PrependUOffsetTRelativeSlot(12, sg_f12, 0)
+    b.PrependUOffsetTRelativeSlot(10, sg_f10, 0)
+    b.PrependUOffsetTRelativeSlot(9, evs[4], 0)
+    b.PrependUOffsetTRelativeSlot(8, evs[5], 0)
+    b.PrependUOffsetTRelativeSlot(7, sg_f7, 0)
+    b.PrependUOffsetTRelativeSlot(6, evs[6], 0)
+    b.PrependUOffsetTRelativeSlot(4, sg_f4, 0)
+    b.PrependUOffsetTRelativeSlot(3, sg_f3, 0)
+    b.PrependUOffsetTRelativeSlot(2, sg_f2, 0)
+    b.PrependUOffsetTRelativeSlot(1, nvec, 0)
+    b.PrependUOffsetTRelativeSlot(0, tvec, 0)
+    sg = b.EndObject()
+    b.StartVector(4, 1, 4)
+    b.PrependUOffsetTRelative(sg)
+    sg_vec = b.EndVector()
+
+    dtype_in = {"a": {"dtype": "bool", "layout": "UNDEFINED"},
+                "b": {"dtype": "bool", "layout": "UNDEFINED"},
+                "x": {"dtype": "float16", "layout": "UNDEFINED"},
+                "y": {"dtype": "float16", "layout": "UNDEFINED"}}
+    dtype_out = {"out1": {"dtype": "bool", "layout": "NCHW"},
+                 "out2": {"dtype": "float16", "layout": "NCHW"}}
+    fb = _emit_root_table(b, sg_vec, dtype_in, dtype_out, 384, 384,
+                          _mixed_root_attrs())
+    return bytes(fb)
+
+
+def build_mixed_and_add(cpu_op="And", npu_op="Add", ref_rc_path=None):
+    fb_bytes = _build_mixed_and_add_body(cpu_op, npu_op)
+    ref_name = "_ref_parallel_and_add.rknn"
+    ref_path = ref_rc_path or str(Path(__file__).resolve().parent / ref_name)
+    ref_data = Path(ref_path).read_bytes()
+    body_size = struct.unpack_from("<Q", ref_data, 0x10)[0]
+
+    root_file = HEADER_SIZE + struct.unpack_from("<I", ref_data, HEADER_SIZE)[0]
+
+    def i32f(o): return struct.unpack_from("<i", ref_data, o)[0]
+    def u16f(o): return struct.unpack_from("<H", ref_data, o)[0]
+    def u32f(o): return struct.unpack_from("<I", ref_data, o)[0]
+
+    vt_file = root_file - i32f(root_file)
+    rc_off = u32f(root_file + u16f(vt_file + 4 + 20 * 2))
+    task_off = u32f(root_file + u16f(vt_file + 4 + 21 * 2))
+    ref_rc = ref_data[rc_off:task_off]
+    ref_taskdesc = ref_data[task_off:HEADER_SIZE + body_size]
+
+    fb_len = len(fb_bytes)
+    if fb_len % 4:
+        pad = 4 - fb_len % 4
+        fb_bytes += b"\x00" * pad
+        fb_len += pad
+
+    full = bytearray(fb_bytes + ref_rc + ref_taskdesc)
+    _patch_root_command_offsets(full, fb_len, ref_rc, len(ref_rc),
+                                ref_taskdesc, 5)
+    return bytes(full[:fb_len]), bytes(full[fb_len:])
+
+
 def _make_trailer(rows, cols, n_inputs, body=None):
     import json
     ins, outp = _io(n_inputs)
@@ -1712,7 +1896,7 @@ def _build_body_scratch_flatbuffers(N, n_inputs, ops=None, dtype="float16"):
     n_adds_check = max(1, n_inputs - 1)
     op_names = rc_template_gen._normalize_ops(n_adds_check, ops)
     if op_names and all(rc_template_gen.is_cpu_op(o) for o in op_names):
-        fb_part, rc_part = _build_cpu_body(n_inputs, ops)
+        fb_part, rc_part = _build_cpu_body(n_inputs, op_names)
         return fb_part + rc_part
     min_ops = max(1, n_inputs - 1)
     n_ops = len(ops) if ops and len(ops) >= min_ops else min_ops

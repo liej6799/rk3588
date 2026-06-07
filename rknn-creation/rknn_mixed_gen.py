@@ -138,6 +138,19 @@ def build_parallel_from_reference(ref_path, branches, out_path):
     return out
 
 
+def build_parallel_from_scratch(branches, out_path):
+    """From-scratch path: generate the FB metadata entirely from scratch,
+    splice with the reference RC + taskdesc (until the RC prefix is decoded).
+    """
+    import rknn_flatbuf
+    fb_part, rc_part = rknn_flatbuf.build_mixed_and_add()
+    body = fb_part + rc_part
+    trailer = _make_trailer(branches)
+    out = make_header(len(body)) + body + trailer
+    Path(out_path).write_bytes(out)
+    return out
+
+
 PRESETS = {
     "and1_add1": {
         "ref": "_ref_parallel_and_add.rknn",
@@ -166,13 +179,18 @@ def main():
     ap.add_argument("--ref", default=None,
                     help="override toolkit reference path (default: from preset)")
     ap.add_argument("-o", "--out", required=True)
+    ap.add_argument("--scratch", action="store_true",
+                    help="generate FB metadata from scratch (default: reference splice)")
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
 
     preset = PRESETS[args.preset]
     ref_path = args.ref or str(ROOT / preset["ref"])
     branches = preset["branches"]
-    build_parallel_from_reference(ref_path, branches, args.out)
+    if args.scratch:
+        build_parallel_from_scratch(branches, args.out)
+    else:
+        build_parallel_from_reference(ref_path, branches, args.out)
     desc = " + ".join(f"{br['op']}({','.join(br['inputs'])})->{br['output']}"
                       for br in branches)
     print(f"generated {args.out} ({desc})")
