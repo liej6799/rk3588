@@ -783,27 +783,28 @@ def _build_subgraph(b, toffs, noffs, n_adds, idx, ins, outp, n_external=None):
     b.PrependUOffsetTRelative(sg)
     return b.EndVector()
 
-def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inputs=None,
-                dtype="float16"):
-    rc_n = n_rc_inputs if n_rc_inputs is not None else n_inputs
-    ins, outp = _io(rc_n)
-    dstr = _resolve_dtype(dtype)["str"]
+def _emit_root_table(b, sgvec, f12_dtype, f13_dtype, f19_a, f19_c, attrs_str):
+    """Emit the 22-field RKNN root table + Finish, returning the FlatBuffer bytes.
+
+    The field layout is byte-identical between the NPU and CPU build paths; the
+    only path-specific inputs are the f12/f13 dtype-JSON maps, the f19 size table
+    operands, and the ev3 attrs string. Everything else (target/toolkit/platform/
+    framework strings, f14..f18, and the Prepend order) is shared.
+    """
     s_target = _str(b, "RKNPU v2")
     s_toolkit = _str(b, "2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16))")
     s_platform = _str(b, "rk3588")
     s_framework = _str(b, "ONNX")
-    dtype_in = {nm: {"dtype": dstr, "layout": "UNDEFINED"} for nm in ins}
-    dtype_out = {outp: {"dtype": dstr, "layout": "NCHW"}}
     import json
-    root_f12 = _str(b, json.dumps(dtype_in, separators=(", ", ": ")))
-    root_f13 = _str(b, json.dumps(dtype_out, separators=(", ", ": ")))
+    root_f12 = _str(b, json.dumps(f12_dtype, separators=(", ", ": ")))
+    root_f13 = _str(b, json.dumps(f13_dtype, separators=(", ", ": ")))
     root_f14 = _vec_u8(b, b"0")
     root_f15 = _ev(b)
     root_f16 = _str(b, "static_shape")
     root_f17 = _ev(b)
     root_f18 = _ev(b)
-    root_f19 = _u64_table2(b, 192 + (rc_n - 2) * 64, 1472 + (rc_n - 2) * 320)
-    root_ev3 = _str(b, _root_attrs(rc_n, N, dtype))
+    root_f19 = _u64_table2(b, f19_a, f19_c)
+    root_ev3 = _str(b, attrs_str)
     root_ev11 = _str(b, "")
     b.StartObject(22)
     b.PrependUint32Slot(21, 1, 0)
@@ -827,9 +828,21 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inpu
     b.PrependUOffsetTRelativeSlot(1, s_target, 0)
     b.PrependUint32Slot(0, 6, 0)
     root = b.EndObject()
-
     b.Finish(root, b"RKNN")
-    fb = bytearray(b.Output())
+    return bytearray(b.Output())
+
+
+def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inputs=None,
+                dtype="float16"):
+    rc_n = n_rc_inputs if n_rc_inputs is not None else n_inputs
+    ins, outp = _io(rc_n)
+    dstr = _resolve_dtype(dtype)["str"]
+    dtype_in = {nm: {"dtype": dstr, "layout": "UNDEFINED"} for nm in ins}
+    dtype_out = {outp: {"dtype": dstr, "layout": "NCHW"}}
+    fb = _emit_root_table(
+        b, sgvec, dtype_in, dtype_out,
+        192 + (rc_n - 2) * 64, 1472 + (rc_n - 2) * 320,
+        _root_attrs(rc_n, N, dtype))
     ew_ops = None
     if ops:
         ew_ops = [rc_template_gen.ew_op_id(o) for o in ops]
@@ -863,14 +876,23 @@ def _build_root(b, sgvec, n_adds, C1, W, tiles, N, n_inputs, ops=None, n_rc_inpu
 
     _patch_regcmd(full, fb_len, n_adds, C1, W, tiles, ops)
 
+    _patch_root_command_offsets(full, fb_len, rc_raw, rc_len, taskdesc, rc_n)
+    return bytes(full[:fb_len]), bytes(full[fb_len:])
+
+
+def _patch_root_command_offsets(full, fb_len, rc_raw, rc_len, taskdesc, rc_n):
+    """Point root f20 (regcmd target) / f21 (task target) at the RC/task sections.
+
+    Shared by the NPU and CPU build paths: both append `rc_raw + taskdesc` after a
+    FlatBuffer body of length fb_len and then rewrite the two root command-offset
+    fields to the absolute byte positions of the RC target word and the task tail.
+    """
     rc_target = _rc_target_offset(rc_raw, rc_n)
     root_rt = struct.unpack_from("<I", full, 0)[0]
     for field_idx, offset in [(20, rc_target),
                               (21, rc_len + len(taskdesc) - 8)]:
         ab = _fb_field_abs(full, root_rt, field_idx)
         struct.pack_into("<I", full, ab, fb_len + offset - ab)
-
-    return bytes(full[:fb_len]), bytes(full[fb_len:])
 
 
 def _rc_target_offset(rc, n_inputs):
@@ -1557,6 +1579,8 @@ def _build_cpu_subgraph(b, toffs, noffs, n, ins, outp, idx):
 def _build_cpu_body(n_inputs, ops=None):
     n = n_inputs
     n_adds = n - 1
+    if ops is None:
+        ops = ["And"] * n_adds
     ins, outp = _cpu_io(n)
     idx = _tensor_indices(n, ins, outp, n_adds)
     mem = _cpu_mem_offsets(n)
@@ -1565,48 +1589,23 @@ def _build_cpu_body(n_inputs, ops=None):
     toffs = _build_cpu_tensors(b, n, ins, outp, n_adds, idx, mem)
     sg_vec = _build_cpu_subgraph(b, toffs, noffs, n, ins, outp, idx)
 
-    s_target = _str(b, "RKNPU v2")
-    s_toolkit = _str(b, "2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16))")
-    s_platform = _str(b, "rk3588")
-    s_framework = _str(b, "ONNX")
-    import json
     dtype_in = {nm: {"dtype": "bool", "layout": "UNDEFINED"} for nm in ins}
     dtype_out = {outp: {"dtype": "bool", "layout": "NCHW"}}
-    root_f12 = _str(b, json.dumps(dtype_in, separators=(", ", ": ")))
-    root_f13 = _str(b, json.dumps(dtype_out, separators=(", ", ": ")))
-    root_f14 = _vec_u8(b, b"0")
-    root_f15 = _ev(b)
-    root_f16 = _str(b, "static_shape")
-    root_f17 = _ev(b)
-    root_f18 = _ev(b)
-    root_f19 = _u64_table2(b, 192 + (n - 2) * 64, 256 + (n - 2) * 64)
-    root_ev3 = _str(b, _cpu_root_attrs(n))
-    root_ev11 = _str(b, "")
-    b.StartObject(22)
-    b.PrependUint32Slot(21, 1, 0)
-    b.PrependUint32Slot(20, 1, 0)
-    b.PrependUOffsetTRelativeSlot(19, root_f19, 0)
-    b.PrependUOffsetTRelativeSlot(18, root_f18, 0)
-    b.PrependUOffsetTRelativeSlot(17, root_f17, 0)
-    b.PrependUOffsetTRelativeSlot(16, root_f16, 0)
-    b.PrependUOffsetTRelativeSlot(15, root_f15, 0)
-    b.PrependUOffsetTRelativeSlot(14, root_f14, 0)
-    b.PrependUOffsetTRelativeSlot(13, root_f13, 0)
-    b.PrependUOffsetTRelativeSlot(12, root_f12, 0)
-    b.PrependUOffsetTRelativeSlot(11, root_ev11, 0)
-    b.PrependUint8Slot(10, 2, 0)
-    b.PrependUOffsetTRelativeSlot(9, s_framework, 0)
-    b.PrependUOffsetTRelativeSlot(8, s_platform, 0)
-    b.PrependUOffsetTRelativeSlot(7, s_toolkit, 0)
-    b.PrependUint32Slot(6, 20302, 0)
-    b.PrependUOffsetTRelativeSlot(3, root_ev3, 0)
-    b.PrependUOffsetTRelativeSlot(2, sg_vec, 0)
-    b.PrependUOffsetTRelativeSlot(1, s_target, 0)
-    b.PrependUint32Slot(0, 6, 0)
-    root = b.EndObject()
-    b.Finish(root, b"RKNN")
-    fb = bytearray(b.Output())
+    fb = _emit_root_table(
+        b, sg_vec, dtype_in, dtype_out,
+        192 + (n - 2) * 64, 256 + (n - 2) * 64,
+        _cpu_root_attrs(n))
     fb_len = len(fb)
+
+    rc_word_off = (HEADER_SIZE + fb_len) // 4
+    lead = rc_template_gen._cpu_lead_u32(n, rc_word_off)
+    prefix_words = len(lead) + rc_template_gen._cpu_nonlead_words(n)
+    canon_total = 160 * (n + 1)
+    total_u32 = 677 + 215 * (n - 2) - 16 * (n // 8)
+    trailing_needed = total_u32 - canon_total - prefix_words
+    if trailing_needed % 2 != 0:
+        fb = fb + b"\x00" * 4
+        fb_len += 4
 
     rc_word_off = (HEADER_SIZE + fb_len) // 4
     rc_raw = rc_template_gen.build_template(n, ops=ops, rc_word_off=rc_word_off)
@@ -1615,13 +1614,7 @@ def _build_cpu_body(n_inputs, ops=None):
     rc_len = len(rc_raw)
     fb_len = len(fb)
 
-    rc_target = _rc_target_offset(rc_raw, n)
-    root_rt = struct.unpack_from("<I", full, 0)[0]
-    for field_idx, offset in [(20, rc_target),
-                              (21, rc_len + len(taskdesc) - 8)]:
-        ab = _fb_field_abs(full, root_rt, field_idx)
-        struct.pack_into("<I", full, ab, fb_len + offset - ab)
-
+    _patch_root_command_offsets(full, fb_len, rc_raw, rc_len, taskdesc, n)
     return bytes(full[:fb_len]), bytes(full[fb_len:])
 
 
