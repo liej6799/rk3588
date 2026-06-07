@@ -21,3 +21,9 @@ verify_parallel
 verify_bool
 verify_int
 query_attr
+verify_hybrid
+verify_hybrid_n
+verify_mixed
+verify_not
+verify_or
+verify_xor

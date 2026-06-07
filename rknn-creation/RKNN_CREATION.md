@@ -888,6 +888,101 @@ flips the alignment lead parity (adding 4 bytes always changes the lead by an
 odd amount: ±1 or ±15 depending on the current pad value), restoring the even
 trailing and making the RC byte-identical to what the toolkit emits.
 
+### Other CPU logical ops: `Or` (supported), `Xor` (not on this runtime)
+
+The CPU-fallback path is fully op-modular, so `Or` and `Xor` were added by listing
+them in `rc_template_gen.CPU_OP_SPECS` alongside `And`. The NPU-side machinery
+(reshape/copy RC blocks, taskdesc, FlatBuffer geometry) is **byte-identical** for
+And/Or/Xor — only the op-name strings and the node field `f7` differ. Verified by
+diffing generated models and by `rc_template_gen.build_template(...)` returning the
+identical RC for all three.
+
+**Key on-device finding (RK3588, librknnrt.so 2.3.2):** the runtime dispatches a
+CPU op by its **op-name string**, NOT by `f7`. Sweeping `f7` over 84..90 for an
+`Or` node always produced correct OR (`OR=0` mismatches in `verify_bool`); `f7` is
+cosmetic for dispatch. We still set the runtime's own enum for fidelity:
+
+| op  | f7 | inputs | status | runtime kernel string in .so |
+|-----|----|--------|--------|------------------------------|
+| And | 85 | 2..64  | verified `a & b & ...` | `librknnrt.so:0x60e1f0` "And" |
+| Or  | 86 | 2..64  | verified `a \| b \| ...` | `librknnrt.so:0x60e270` "Or"  |
+| Not | 78 | 1 only | verified `~a` (inherently unary) | `librknnrt.so:0x60e190` "Not" |
+| Xor | –  | 2..64  | verified parity `a0^a1^...` (FUSED DAG) | (no native kernel) |
+
+**Multi-input support.** And/Or take 2..64 inputs (left-associated native chain).
+Not is a 1-input gate (N-input is not meaningful). Xor takes 2..64 inputs as a
+fused **parity** chain: `acc = XOR(acc, a_k)` per extra input, each stage a 4-op
+And/Or/Not DAG. Verified on-device for n=2,3,4,5,8 (`verify_xor`, full per-element
+parity at N=4 and N=16).
+
+`Xor` has no native CPU kernel (rejected at `rknn_init`: *"Unsupport CPU op: Xor in
+this librknnrt.so"* for every `f7` 56..90). **It is instead synthesised as a fused
+single-model DAG** from the working And/Or/Not kernels — see below.
+
+### Fused XOR: a single .rknn 4-op CPU DAG (no native kernel needed)
+
+`XOR(a,b) = (a OR b) AND NOT(a AND b)` is built as ONE `.rknn` containing 4 CPU
+compute nodes (`rknn_flatbuf._build_cpu_xor_body`).  **Verified on-device**
+(`verify_bool`: `XOR=0` mismatches, out `[0,1,1,0]` for a=`[0,1,0,1]`,b=`[0,0,1,1]`).
+
+Key decode that made this easy: **CPU compute nodes touch the NPU only via Reshape
+nodes; intermediate results flow CPU-side WITHOUT reshapes** (just like `t1`
+between `and1`/`and2` in a chained-And).  XOR's only reshapes are `a_rs`, `b_rs`,
+`out-rs` -> the RC stream, taskdesc, `sg.f10=[0,0,0,3,6]` and `sg.f7` are
+**byte-identical to the 2-input And model**.  Only the FlatBuffer node set and 3
+intermediate tensors are new:
+
+```
+in a,b -> a_rs,b_rs (reshape; the only NPU/RC work)
+and1: a_rs,b_rs  -> t_and     (f7=85)
+or1:  a_rs,b_rs  -> t_or      (f7=86)   <- a_rs/b_rs fan out to two ops
+not1: t_and      -> t_not     (f7=78)
+and2: t_or,t_not -> out-rs    (f7=85)
+out-rs reshape   -> out
+```
+
+Two non-obvious memory requirements (both found by on-device debugging):
+1. The 3 per-stage intermediates (`s{k}_and/_or/_not`) must each get a **distinct
+   workspace offset** (f13) or the CPU kernels alias one buffer and the result
+   collapses to plain AND.
+2. For n>2 the input reshapes must ALSO use distinct offsets. The native n-input
+   And reshape plan reuses slots (e.g. `b_rs` and `c_rs` share offset 192) because
+   a linear chain consumes each input immediately; chained XOR keeps every input
+   live until its stage, so `_build_cpu_xor_body` assigns inputs distinct slots
+   (`(i+1)*64`) and stacks intermediates above them. Without this, n=3 returned
+   just `a` (later inputs clobbered).
+
+N-input XOR chains one 4-op stage per extra input: `acc = (acc OR x_k) AND
+NOT(acc AND x_k)`, RC/taskdesc/sg.f10 identical to the n-input And model.
+
+This is the first **fused multi-op CPU DAG** built from scratch, and the template
+for composing any boolean function from And/Or/Not.
+
+**NOT gate (unary).** `Not` is the first *single-input* CPU op. Its graph topology
+differs from the binary chain: `input(a) -> reshape(a_rs) -> Not(a_rs -> out_rs)
+-> reshape(out-rs) -> output(out)` = **2 reshape/copy RC blocks**, `sg.f10 =
+[0,0,0,2,4]`. This is exactly the binary closed-form layout evaluated at `n=1`, so
+the same `rc_template_gen` prefix/canon/trailing and `_taskdesc_cpu` generators are
+reused (with `n_inputs=1` now permitted for ops in `CPU_UNARY_OPS`). The
+FlatBuffer body is built by `rknn_flatbuf._build_cpu_unary_body` (a 1-input variant
+of `_build_cpu_body`; the op node `_op_node(..., in_idxs=[a_rs])` carries a
+single-element input vector f4). Verified on-device: input `[1,0,1,0]` ->
+`[0,1,0,1]` (`verify_not` PASS).
+
+How the f7 enum space was located: the CPU-op dispatch switch is in
+`librknnrt.so` at `0x2aaf..` (`cmp w0,#0x55` for And at `0x2aafa4`), a contiguous
+`cmp/b.eq` chain over `f7` (~0x37..0x57) remapping to an internal kernel index.
+
+**Generator / verifiers:**
+- `rknn_logical_gen.py --op {And,Or,Not,Xor} [--inputs N] -o m.rknn --verify` —
+  from-scratch bool `[1,N]` model; binary And/Or chain n=2..64, unary Not (1 input),
+  and fused Xor (single .rknn, 4-op DAG).  `--probe-enum LO-HI` sweeps `f7`
+  candidates on-device (for adding future native ops).
+- `verify_or.cpp` / `verify_or` — N-input OR-of-all harness (mirrors `verify_and`).
+  On-device PASS for Or n=2,3,4,8 and And n=2,4,8.
+- `verify_not.cpp` / `verify_not` — unary NOT harness (`~[1,0,1,0] == [0,1,0,1]`).
+  On-device PASS.
+
 ## 6f. Mixed CPU(And) + NPU(Add) in one model ("AND and ADD at the same time")
 
 A single `.rknn` can hold both a CPU-fallback op (And) and an NPU element-wise op
@@ -941,8 +1036,52 @@ zero DMA 'count' fields              -> STILL PASSES (count is cosmetic)
 The prefix is regular (it generalises the CPU `_cpu_prefix`: a size table with
 one entry per block, then `n_blocks+2` copy descriptors with chain addresses, then
 3×n_blocks DMA records), but its chain addresses + size table must be byte-exact.
-Reproducing it from scratch is the same `RKNNSubGraphMemoryPlanPass` +
-relocation-table port that gates large-N Add (section 6) — not yet done.
+
+**UPDATE — mixed prefix decoded and reproduced from scratch (byte-exact).**
+`rc_template_gen.mixed_prefix(cpu_blocks, compute_blocks)` now generates the whole
+mixed RC prefix from scratch.  It is **byte-exact vs `_ref_parallel_and_add.rknn`**
+(B=9: 3 copy + 6 compute → 270 prefix words; `prefix + ref block region == full
+ref RC`).  The descriptor addresses use the SAME per-block arithmetic as the
+standalone CPU prefix, keyed on total block count B:
+
+```
+chain0     = 0x18 * B - 0x1c
+chain1     = 0x98 * B - 0x234
+canon_base = 0x318 * B - 0x20c        (canon descriptors stride 0x28, B-3 of them)
+size[k]    = 0xc + 0x1c*k  desc; size[top] = 0x1c*B - 0x14
+post-size  = 0x78 * B - 0x1e0
+```
+
+These per-block steps (0x18 / 0x98 / 0x318 / 0x1c) are identical to
+`_cpu_prefix`'s `(n-2)` steps (24 / 152 / 792 / 28), confirming the mixed prefix
+is the same descriptor template over B blocks.
+
+**Mixed RC fully decoded — prefix + block region generated from scratch:**
+
+* `rc_template_gen.mixed_prefix(cpu_blocks, compute_blocks, rc_word_off=None)`:
+  full descriptor prefix. Address fields (size table, copy-desc chain addresses,
+  DMA addresses) are **byte-exact vs the 2+2 reference** (0 non-cosmetic diffs);
+  `from-scratch prefix + ref block region == full ref RC`.
+* `rc_template_gen.mixed_block_region(cpu_blocks, npu_ops)`: the block region.
+  CPU copy blocks are **byte-exact**; NPU compute blocks reuse the standard canon
+  with the `[1,4]` per-tile geometry (fields 0x4024/0x4030/0x403c/0x4058/0x405c/
+  0x40c0/0x500c/0x5014/0x5040, decoded from the reference).
+* **DMA `count` fields are cosmetic** (proven on-device: zeroing all 15 counts
+  still PASSES); only the addresses are load-validated. DMA addresses = a ramp of
+  `C` copy-block offsets (`0x280*i`) + the `K` compute-block offsets
+  (`0x280*(C+j)`), split across 3 groups as 1,2,3 per 6-tile block.
+* **On-device verified**: a 2+2 And+Add model whose RC prefix is replaced wholesale
+  with the from-scratch `mixed_prefix(3,6)` (cosmetic counts included) PASSES
+  (`verify_hybrid`, 0 mismatches). The reference RC file is no longer needed for
+  the prefix.
+
+**N-input mixed branch update:** the toolkit is now available and references were
+minted for true per-branch arity changes: `_ref_3and_2add.rknn`,
+`_ref_2and_3add.rknn`, `_ref_4and_2add.rknn`, `_ref_2and_4add.rknn`, and
+`_ref_3and_3add.rknn`. All load and run on-device at bool/fp16 `[1,4]`.  The
+mixed prefix descriptor formulas match the runtime-validated fields across these
+references; the CLI uses the references for N-input branch arities while the
+from-scratch N-input mixed RC block geometry remains compiler-tiler work.
 
 ### Current generator: hybrid + from-scratch (works today, NPU-verified)
 
@@ -979,6 +1118,73 @@ The from-scratch FB body (11296 bytes) uses this tensor/node layout:
 The remaining from-scratch work is the combined RC prefix (the mixed-graph
 descriptor + DMA schedule is a superset of both the CPU `_cpu_prefix` and the
 NPU `_build_prefix`; its chain addresses + size table must be byte-exact).
+
+### Extended hybrid op matrix: CPU And/Or/Xor + NPU Add/Sub/Div
+
+The same fixed mixed schedule (3 CPU copy blocks + 6 NPU compute blocks) now works
+for these parallel graphs at shape `[1,4]`:
+
+| CPU branch (`out1`) | NPU branch (`out2`) | status |
+|---------------------|---------------------|--------|
+| And                 | Add                 | PASS |
+| And                 | Sub                 | PASS |
+| And                 | Div                 | PASS |
+| Or                  | Add                 | PASS |
+| Or                  | Sub                 | PASS |
+| Or                  | Div                 | PASS |
+| Xor (fused DAG)     | Add                 | PASS |
+| Xor (fused DAG)     | Sub                 | PASS |
+| Xor (fused DAG)     | Div                 | PASS |
+
+**NPU op patching.** The reference RC is Add.  To make Sub/Div real (not just a
+renamed FlatBuffer node), `_patch_mixed_npu_op()` rewrites the NPU compute blocks'
+per-op registers:
+
+```
+0x4070  EW_CFG       Add 0x108202c0, Sub 0x108402c0, Div 0x108303c0
+0x4084  DPU_OUT_RES  Add/Sub 0x00010001, Div 0x00000001
+0x5044  RDMA_BN_MUL  Add/Sub 0x00017849, Div 0x00017841
+```
+
+Only compute blocks are patched; the first 3 CPU copy blocks keep `EW_CFG=0x383`.
+Important bug found/fixed: the patch must preserve the 16-bit command target in
+bits 48..63 (`0x1001`/`0x2001`) and only replace bits 16..47.  Clearing the target
+made patched Sub produce all-zero output.
+
+N-input references can start their 64-bit register words at byte phase 0 or 4
+inside the u32 mixed stream, depending on prefix alignment. `_patch_mixed_npu_op()`
+now detects the phase dynamically before patching; verified for NPU arity 2, 3,
+and 4 with `Sub` and `Div`.
+
+**CPU Xor branch.** Native Xor is still unsupported by the runtime, so the mixed
+Xor CPU branch is the same 4-op fused DAG used by the pure CPU generator:
+`(a OR b) AND NOT(a AND b)`.  It still has only 3 reshape/copy blocks (`a_rs`,
+`b_rs`, `out1-rs`), so the reference mixed RC schedule stays valid; the FlatBuffer
+body just grows by 3 compute nodes + 3 intermediate tensors with distinct f13
+workspace offsets.
+
+**CLI / verifier:**
+
+```
+rknn_hybrid_gen.py --cpu {And,Or,Xor} --npu {Add,Sub,Div} -o hybrid.rknn --verify
+rknn_hybrid_gen.py --cpu Or --cpu-inputs 3 --npu Div --npu-inputs 3 -o hybrid.rknn --verify
+verify_hybrid MODEL.rknn CPU_OP NPU_OP
+verify_hybrid_n MODEL.rknn N_CPU CPU_OP N_NPU NPU_OP
+```
+
+For N-input branches (`--cpu-inputs` or `--npu-inputs` not 2), the CLI selects the
+matching `_ref_{n_cpu}and_{n_npu}add.rknn`, patches exact CPU `And` strings to
+`Or` when requested, and patches NPU Add RC blocks to `Sub`/`Div`. N-input mixed
+`Xor` is intentionally rejected unless a fused-DAG reference is supplied; the 2+2
+path still supports fused `Xor`.
+
+**Size limitation:** this hybrid path is currently fixed to `--cols 4` (`[1,4]`).
+The mixed RC prefix/taskdesc are runtime-validated and shape-specific. Passing a
+larger N in the trailer does not change the runtime tensors; CPU-fallback models
+still report `n_elems=4`. Supporting larger mixed element counts requires
+generating the combined mixed RC prefix/descriptor table for that shape (the
+compiler-tiler work described above), or collecting matching toolkit references
+per shape.
 
 ---
 
@@ -1098,6 +1304,10 @@ runtime reports as `BOOL` and executes correctly on a CPU kernel.
 | `verify_and` / `.cpp` | n-input chained-`And` correctness harness (sets all n inputs, AND-of-all check); n=2..64 PASS |
 | `test_and_chain_n.cpp` | n-input chained-`And` correctness harness (AND-of-all-inputs check) |
 | `rknn_mixed_gen.py` | mixed CPU(And)+NPU(Add) parallel generator (§6f); hybrid ref-body + from-scratch container/trailer; `--scratch` for fully from-scratch FB body; PASS on-device |
+| `rknn_hybrid_gen.py` | parallel CPU logical + NPU arithmetic CLI; 2+2 supports `And/Or/Xor` × `Add/Sub/Div`; N-input reference-splice supports `And/Or` × `Add/Sub/Div` with `--cpu-inputs/--npu-inputs` |
+| `verify_hybrid_n.cpp` / `verify_hybrid_n` | N-input mixed verifier (`MODEL N_CPU CPU_OP N_NPU NPU_OP`) |
+| `mint_mixed_refs.py` | mint N-input mixed `And+Add` references via toolkit for `rknn_hybrid_gen.py` |
 | `_ref_parallel_and_add.rknn` | toolkit-built reference for the parallel And+Add graph (hybrid FB body source for `rknn_mixed_gen.py`) |
+| `_ref_3and_2add.rknn`, `_ref_2and_3add.rknn`, `_ref_4and_2add.rknn`, `_ref_2and_4add.rknn`, `_ref_3and_3add.rknn` | toolkit-built N-input mixed references used for verified branch arity changes |
 | `rc_template_gen.mixed_parallel_block_schedule()` | decoded mixed RC block schedule (copy+compute), byte-exact vs vendor (§6f) |
 | `/data/rk3588/rknn-header/rkt_registers.h` | rk3588 NPU register definitions |

@@ -65,12 +65,55 @@ _COPY_SHAPE_FILL = {
 
 _OP_NAMES = {"Add": EW_OP_ADD, "Sub": EW_OP_SUB, "Mul": EW_OP_MUL, "Div": EW_OP_DIV}
 
-# CPU-fallback ops execute on a CPU kernel (node field f7 = the enum below), with
-# the NPU running only reshape/copy blocks (no DPU compute). The enum values are
-# the runtime's internal CPU op-type codes, decoded byte-exact from references.
-CPU_OP_ENUMS = {
-    "And": 85,
+# CPU-fallback ops execute on a CPU kernel, with the NPU running only reshape/copy
+# blocks (no DPU compute).  The NPU-side machinery (reshape/copy RC blocks,
+# taskdesc, FlatBuffer node geometry) is COMPLETELY op-agnostic: And / Or models of
+# the same arity are byte-identical except for the op-name strings (and the f7
+# value below).
+#
+# IMPORTANT (verified on-device, RK3588, librknnrt.so 2.3.2): the runtime selects
+# the CPU kernel by the node's OP-NAME STRING ("And" / "Or"), NOT by the f7 enum --
+# an "Or" node computes OR for any f7, and an op whose name has no CPU kernel (e.g.
+# "Xor") is rejected at load regardless of f7.  f7 is therefore cosmetic for
+# dispatch; we still set it to the runtime's own op-type enum for fidelity.
+#
+# Provenance of the f7 values:
+#   And = 85 (0x55): decoded byte-exact from toolkit references AND seen in the
+#         runtime CPU-op dispatch switch (cmp w0,#0x55 at librknnrt.so:0x2aafa4).
+#   Or  = 86 (0x56): runtime has an "Or" CPU kernel (string at 0x60e270); the
+#         dispatch case 0x56 sits right after And on the same handler path.
+#         Verified on-device: out = a|b, 0 mismatches vs OR (verify_bool).
+#
+# UNSUPPORTED on this runtime:
+#   Xor: librknnrt.so 2.3.2 has NO "Xor" CPU kernel (no "Xor" string in the .so).
+#        rknn_init() rejects it: "Unsupport CPU op: Xor in this librknnrt.so".
+#        Confirmed by sweeping every f7 56..90 -- all rejected.  Running Xor would
+#        require rknn_register_custom_ops (a custom op) or a newer runtime, so it is
+#        intentionally NOT listed here.  (XOR can also be expressed without a native
+#        kernel as (a OR b) AND NOT(a AND b), but that needs a multi-node graph.)
+#
+# Each value is (enum, verified) so tooling can tell ground-truth from candidates;
+# cpu_op_id() returns the int regardless.
+#
+# UNARY ops (1 input, 1 output) -- listed in CPU_UNARY_OPS below -- use a distinct
+# graph topology (1 input reshape -> op -> 1 output reshape, 2 RC copy blocks)
+# rather than the binary 2-input chain.  Not is a NOT gate (out = ~a, bool):
+#   Not: runtime HAS a "Not" CPU kernel (string at librknnrt.so:0x60e190).  f7 is
+#        cosmetic for dispatch (runtime keys on the op name), confirmed for And/Or;
+#        the value here is set for fidelity and verified on-device via verify_not.
+CPU_OP_SPECS = {
+    "And": (85, True),
+    "Or":  (86, True),
+    "Not": (78, True),
 }
+CPU_OP_ENUMS = {name: val for name, (val, _verified) in CPU_OP_SPECS.items()}
+
+# Ops that take a single input (unary).  Everything else in CPU_OP_SPECS is binary.
+CPU_UNARY_OPS = {"Not"}
+
+
+def is_unary_cpu_op(name):
+    return name in CPU_UNARY_OPS
 
 # Single modular op classification used by both the FlatBuffer node builder and
 # the regcmd generator. NPU ops dispatch to element-wise _canon compute blocks;
@@ -86,6 +129,11 @@ def is_npu_op(name):
 def cpu_op_id(name):
     """Runtime CPU op-type enum (node field f7) for a CPU-fallback op."""
     return CPU_OP_ENUMS[name]
+
+
+def cpu_op_verified(name):
+    """True if this CPU op's f7 enum is confirmed ground-truth (vs a candidate)."""
+    return CPU_OP_SPECS.get(name, (None, False))[1]
 
 
 def ew_op_id(name):
@@ -360,6 +408,27 @@ def _normalize_ops(n_adds, ops):
     return out[:n_adds]
 
 
+def _build_cpu_copy_blocks(n_inputs, rc_word_off=0):
+    """CPU-fallback reshape/copy RC stream as a uint32 byte string.
+
+    n_inputs+1 reshape/copy `_canon(EW_OP_COPY)` blocks framed by PC chain
+    addresses + GAP, preceded by the closed-form CPU descriptor prefix (aligned
+    via rc_word_off) and followed by the CPU trailing descriptors.  Shared by the
+    binary chain (n>=2) and the unary path (n=1, e.g. Not -> 2 blocks).
+    """
+    n_blocks = n_inputs + 1
+    u = _build_prefix(n_inputs, EW_OP_COPY, rc_word_off)
+    prefix_words = len(u)
+    canon = _canon_u32(EW_OP_COPY)
+    for blk in range(n_blocks):
+        if blk < n_blocks - 1:
+            u += canon + _pc_chain_u32((blk + 1) * 0x280) + _pc14_u32() + _gap71_u32()
+        else:
+            u += canon + _gap69_u32()
+    u += _cpu_trailing_u32(n_inputs, prefix_words)
+    return struct.pack(f"<{len(u)}I", *u)
+
+
 def build_template(n_inputs, ops=None, rc_word_off=0):
     """Modular regcmd generator (single path for NPU and CPU ops).
 
@@ -375,6 +444,17 @@ def build_template(n_inputs, ops=None, rc_word_off=0):
     it is used only by the CPU path to align the reshape/copy canon to a 64-byte
     boundary, matching the toolkit's placement.
     """
+    # Unary CPU op (1 input, e.g. Not): a single op node, with 1 input reshape and
+    # 1 output reshape -> 2 reshape/copy RC blocks.  Uses the same closed-form CPU
+    # prefix/canon/trailing math as the binary path, evaluated at n_inputs=1.
+    if n_inputs == 1:
+        unary = [o for o in (ops if isinstance(ops, (list, tuple)) else [ops]) if o]
+        if not unary or not all(is_unary_cpu_op(o) for o in unary):
+            raise NotImplementedError(
+                f"n_inputs=1 is only supported for unary CPU ops {sorted(CPU_UNARY_OPS)}, "
+                f"got ops={ops}")
+        return _build_cpu_copy_blocks(1, rc_word_off)
+
     if not 2 <= n_inputs <= MAX_INPUTS:
         raise NotImplementedError(
             f"regcmd template generation supports 2..{MAX_INPUTS} inputs, got {n_inputs}")
@@ -393,17 +473,7 @@ def build_template(n_inputs, ops=None, rc_word_off=0):
     if all(cpu_flags):
         # CPU-fallback chain: n+1 reshape/copy canon blocks (uint32 stream, with
         # the CPU descriptor prefix and an alignment lead computed from rc_word_off).
-        n_blocks = n_inputs + 1
-        u = _build_prefix(n_inputs, EW_OP_COPY, rc_word_off)
-        prefix_words = len(u)
-        canon = _canon_u32(EW_OP_COPY)
-        for blk in range(n_blocks):
-            if blk < n_blocks - 1:
-                u += canon + _pc_chain_u32((blk + 1) * 0x280) + _pc14_u32() + _gap71_u32()
-            else:
-                u += canon + _gap69_u32()
-        u += _cpu_trailing_u32(n_inputs, prefix_words)
-        return struct.pack(f"<{len(u)}I", *u)
+        return _build_cpu_copy_blocks(n_inputs, rc_word_off)
 
     # NPU element-wise chain: 6 tiles of compute canon blocks (uint64 stream).
     ew_ids = [ew_op_id(o) for o in op_names]
@@ -585,6 +655,120 @@ def _cpu_prefix(n, rc_word_off):
     words += [0] * ((2 * n) % 16)
     words.append(0x280 * (n + 1))
     return words
+
+
+def _mixed_lead(rc_word_off):
+    """Alignment lead (u32 words) for the mixed prefix, like _cpu_lead_u32.
+
+    The mixed prefix body (header + tables + descriptors) must land so the first
+    canon block is 16-u32 aligned.  For the available references the lead is 4
+    zero words (B=9 @ residue 2) or a 3-word offset suffix + zeros (B=12 @
+    residue 3); both reduce to the same alignment math the CPU path uses.
+    """
+    # The B=9 reference (rc_word_off%16==2) uses a 4-word zero lead; derive the
+    # generic lead from the residue with the same suffix sequence as the CPU path.
+    residue = rc_word_off % 16
+    pad = (-(residue + 2)) % 16           # +2: the body starts 2 words into the bank
+    length = pad if pad >= 4 else pad + 16
+    if length >= 12:
+        return _CPU_OFFSET_LEAD_SEQ[-(length - 11):] + [0] * 11
+    return [0] * length
+
+
+def mixed_prefix(cpu_blocks, n_npu, rc_word_off=None):
+    """From-scratch mixed-parallel RC descriptor prefix (u32 words).
+
+    Parameterized by the CPU copy-block count C (= sum of n_in+1 over CPU
+    branches) and the NPU branch input count n_npu.  Decoded and VALIDATED
+    byte-exact (non-cosmetic fields) against toolkit references for
+    (C,n_npu) in {(3,2),(4,2),(5,2),(3,3),(4,3),(3,4)}.
+
+    Closed forms (anomaly = 64*(n_npu//4), the NPU surface-tiling step):
+
+        K        = 6*(n_npu-1)                 NPU compute blocks
+        n_desc   = C + n_npu + 3               canon descriptors after chain0/1
+        size cnt = C + n_npu + 4
+        chain0     = 24*C + 24*n_npu + 68
+        chain1     = 152*C + 280*n_npu - 212  - anomaly
+        canon_base = 792*C + 4120*n_npu - 4012 - anomaly   (stride 0x28)
+        top size   = 28*C + 28*n_npu + 92
+        post size  = 120*C + 240*n_npu - 240
+        DMA: 3 groups, each = ramp[0x280*i, i<C] + tails[0x280*(C+j)]; the K tails
+             split across groups as [1,2,3]*(n_npu-1).  Counts are cosmetic.
+
+    rc_word_off (RC section u32 file offset) selects the alignment lead; None uses
+    the 4-word lead of the C=3,n_npu=2 reference.
+    """
+    C = cpu_blocks
+    nn = n_npu
+    K = 6 * (nn - 1)
+    B = C + K
+    anomaly = 64 * (nn // 4)
+    sc = C + nn + 4
+    n_desc = C + nn + 3
+
+    words = list(_mixed_lead(rc_word_off)) if rc_word_off is not None else [0, 0, 0, 0]
+    words += _fixed_header()                  # a_rs_i1 header (30 u32)
+    words += [0] * 15
+
+    # size table: count then `sc` descending sizes (step 0x1c, +0x18 at the top).
+    top = 28 * C + 28 * nn + 92
+    words.append(sc)
+    words.append(top)
+    words += [0xc + 0x1c * k for k in range(sc - 2, -1, -1)]
+
+    # copy descriptors: chain0, chain1, then n_desc canon descriptors @ stride 0x28.
+    chain0 = 24 * C + 24 * nn + 68
+    chain1 = 152 * C + 280 * nn - 212 - anomaly
+    canon_base = 792 * C + 4120 * nn - 4012 - anomaly
+    copy_addrs = [chain0, chain1] + [canon_base + 0x28 * k for k in range(n_desc)]
+    for i, addr in enumerate(copy_addrs):
+        marker = 0x00040010 if i == len(copy_addrs) - 1 else 0x00040012
+        words += [0x00060000, marker, 0x00000006, addr, 0, 0]
+
+    # DMA section: post-size header, then 3 groups.
+    post_size = 120 * C + 240 * nn - 240
+    words += [0x00040004, 0x00000004, post_size, 0]
+    ramp_addrs = [0x280 * i for i in range(C)]
+    tail_addrs = [0x280 * (C + j) for j in range(K)]
+    nadd = nn - 1
+    grp_sizes = [1 * nadd, 2 * nadd, 3 * nadd]
+    splits, off = [], 0
+    for gs in grp_sizes:
+        splits.append((off, off + gs)); off += gs
+    for g, (lo, hi) in enumerate(splits):
+        for i, a in enumerate(ramp_addrs):
+            words += [C + 1 + i, 0x18, 0x300, 0x1ffff, 0, 0x45, 0, a, 0, 0]
+        for j in range(lo, hi):
+            words += [B + 2, 0x18, 0x300, 0x1ffff, 0, 0x45, 0, tail_addrs[j], 0, 0]
+
+    words += [0] * 8
+    words.append(0x280 * B)
+    return words
+
+
+def mixed_block_region(cpu_blocks, npu_ops):
+    """The mixed RC block region (u32 words): C copy canons then NPU compute canons.
+
+    cpu_blocks: number of CPU copy/reshape blocks (= sum of n_in+1 per CPU branch).
+    npu_ops: list of EW op ids, one per NPU compute block (6 tiles x n_adds, in
+             tile-major order).  Each block is a 160-word canon: 138-word canon +
+             a PC chain link (to 0x280*(idx+1)) + PC14 + GAP, exactly as the
+             standalone CPU/NPU paths emit.  Verified address-exact vs the 2+2 ref.
+    """
+    out = []
+    total = cpu_blocks + len(npu_ops)
+    for b in range(total):
+        if b < cpu_blocks:
+            canon = _canon_u32(EW_OP_COPY)
+        else:
+            canon = _canon_u32(npu_ops[b - cpu_blocks])
+        out += canon
+        if b < total - 1:
+            out += _pc_chain_u32((b + 1) * 0x280) + _pc14_u32() + _gap71_u32()
+        else:
+            out += _gap69_u32()
+    return out
 
 
 def _build_prefix(n, op=EW_OP_ADD, rc_word_off=0):

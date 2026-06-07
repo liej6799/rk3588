@@ -968,11 +968,14 @@ _TD_CPU_DIM = 0x04
 
 
 def _taskdesc_cpu(n_inputs, rc_word_off=0):
-    if n_inputs < 2:
+    if n_inputs < 1:
         raise ValueError(f"taskdesc not available for {n_inputs} inputs")
     rec_out = _td_rec(_TD_F12_OUT, [1, _TD_CPU_DIM])
     rec_in = _td_rec(_TD_F12_IN, [1, 1, 1, _TD_CPU_DIM])
-    if n_inputs == 2:
+    if n_inputs == 1:
+        # Unary (Not): one output reshape record + one input reshape record.
+        words = [0] * 6 + rec_out + rec_in + [0]
+    elif n_inputs == 2:
         words = [0] * 6 + rec_out + rec_in + rec_in + [0]
     else:
         # The taskdesc is a cyclic window into repeated input records; the window
@@ -1177,13 +1180,16 @@ def _empty_attrs_table(b):
 
 
 def _op_node(b, op_num, in_a_idx, in_b_idx, out_idx, op="Add",
-             npu_f10=None, npu_f12=None):
-    """Binary op node, modular over NPU element-wise and CPU-fallback ops.
+             npu_f10=None, npu_f12=None, in_idxs=None):
+    """Binary (or unary) op node, modular over NPU element-wise and CPU ops.
 
     NPU ops (Add/Sub/Mul/Div) carry node field f3 = DPU op-type (2) and the
-    NPU geometry vectors. CPU ops (And/...) instead carry field f7 = the runtime
-    CPU op-type enum and field f8 = an empty attributes table, with the geometry
-    vectors zeroed (the NPU only reshapes; the CPU kernel does the compute).
+    NPU geometry vectors. CPU ops (And/Or/Not/...) instead carry field f7 = the
+    runtime CPU op-type enum and field f8 = an empty attributes table, with the
+    geometry vectors zeroed (the NPU only reshapes; the CPU kernel does compute).
+
+    in_idxs overrides the input-index vector f4 (default [in_a_idx, in_b_idx]);
+    pass a single-element list for unary CPU ops like Not.
 
     npu_f10/npu_f12 override the default NPU geometry vectors (used by the mixed
     model builder for non-standard tensor shapes like [1,4]).
@@ -1194,7 +1200,7 @@ def _op_node(b, op_num, in_a_idx, in_b_idx, out_idx, op="Add",
         nm_s = _str(b, f"{op}:{op}:{op.lower()}{op_num}")
     else:
         nm_s = _str(b, f"{op}:{op.lower()}{op_num}")
-    f4 = _vec(b, [in_a_idx, in_b_idx])
+    f4 = _vec(b, in_idxs if in_idxs is not None else [in_a_idx, in_b_idx])
     f5 = _vec(b, [out_idx])
     if cpu:
         f8 = _empty_attrs_table(b)
@@ -1623,6 +1629,219 @@ def _build_cpu_body(n_inputs, ops=None):
     return bytes(full[:fb_len]), bytes(full[fb_len:])
 
 
+# ── Unary CPU-fallback op body builder (e.g. Not: out = ~a, bool [1,4]) ──
+#
+# Topology (1 input, 1 output): input(a) -> reshape(a_rs) -> Not(a_rs -> out_rs)
+# -> reshape(out-rs) -> output(out).  Reuses the same per-tensor reshape/exsec
+# tables and the same closed-form CPU RC prefix/canon/trailing as the binary path
+# evaluated at n=1 (2 reshape/copy RC blocks; sg.f10 = [0,0,0,2,4]).
+
+def _build_cpu_unary_nodes(b, ins, outp, idx, op):
+    a = ins[0]
+    noffs = [_input_node(b, a, idx[a])]
+    noffs.append(_cpu_reshape_node(
+        b, f"{a}_rs", a,
+        [idx[a], idx[f"{a}_rsi1"], idx[f"{a}_exsec"]],
+        [idx[f"{a}_rs"]]))
+    # Unary op node: single input (the reshaped a), single output (out_rs).
+    noffs.append(_op_node(b, 1, 0, 0, idx[f"{outp}_rs"], op=op,
+                          in_idxs=[idx[f"{a}_rs"]]))
+    noffs.append(_cpu_reshape_node(
+        b, f"{outp}-rs", outp,
+        [idx[f"{outp}_rs"], idx[f"{outp}_rsi1"], idx[f"{outp}_rs_exsec"]],
+        [idx[outp]]))
+    noffs.append(_cpu_output_node(b, outp, idx[outp]))
+    return noffs
+
+
+def _build_cpu_unary_body(op="Not"):
+    """Build a from-scratch unary CPU-fallback model (bool [1,4]).
+
+    Mirrors _build_cpu_body but for a single-input op.  The n-dependent binary
+    size formulas are evaluated at n=1; the RC and taskdesc come from the shared
+    n=1 generators (rc_template_gen.build_template / _taskdesc_cpu).
+    """
+    n = 1
+    ins, outp = _cpu_io(n)
+    idx = _tensor_indices(n, ins, outp, 0)
+    mem = _cpu_mem_offsets(n)
+    b = flatbuffers.Builder(65536)
+    noffs = _build_cpu_unary_nodes(b, ins, outp, idx, op)
+    toffs = _build_cpu_tensors(b, n, ins, outp, 0, idx, mem)
+    sg_vec = _build_cpu_subgraph(b, toffs, noffs, n, ins, outp, idx)
+
+    dtype_in = {nm: {"dtype": "bool", "layout": "UNDEFINED"} for nm in ins}
+    dtype_out = {outp: {"dtype": "bool", "layout": "NCHW"}}
+    fb = _emit_root_table(
+        b, sg_vec, dtype_in, dtype_out,
+        192 + (n - 2) * 64, 256 + (n - 2) * 64,
+        _cpu_root_attrs(n))
+    fb_len = len(fb)
+
+    # Parity fix-up (same idea as _build_cpu_body): keep the CPU RC trailing even
+    # so the total RC u32 count matches the canon+prefix layout.
+    rc_word_off = (HEADER_SIZE + fb_len) // 4
+    rc_raw = rc_template_gen.build_template(n, ops=[op], rc_word_off=rc_word_off)
+    if (len(rc_raw) // 4) % 2 != 0:
+        fb = fb + b"\x00" * 4
+        fb_len += 4
+        rc_word_off = (HEADER_SIZE + fb_len) // 4
+        rc_raw = rc_template_gen.build_template(n, ops=[op], rc_word_off=rc_word_off)
+
+    taskdesc = _taskdesc_cpu(n, rc_word_off=rc_word_off)
+    full = fb + rc_raw + taskdesc
+    rc_len = len(rc_raw)
+    fb_len = len(fb)
+    _patch_root_command_offsets(full, fb_len, rc_raw, rc_len, taskdesc, n)
+    return bytes(full[:fb_len]), bytes(full[fb_len:])
+
+
+# ── Fused XOR via And/Or/Not CPU ops (n-input parity, single .rknn) ──
+#
+# XOR has no native CPU kernel on this runtime, but is the identity
+#   XOR(a,b) = (a OR b) AND NOT(a AND b)
+# expressed as a CPU DAG.  N-input XOR (parity a0^a1^...^a{n-1}) chains one such
+# 4-op stage per extra input, left-associated:  acc = XOR(acc, a_k).
+#
+# Crucial decode: CPU compute nodes touch the NPU only via Reshape nodes;
+# intermediates between compute nodes flow CPU-side WITHOUT reshapes.  So the only
+# reshapes are the n input reshapes + the output reshape -> the RC stream,
+# taskdesc, sg.f10 and sg.f7 are byte-identical to the n-input And model.  Only the
+# FlatBuffer compute-node set + the per-stage intermediate tensors are new.
+#
+# Each stage k computes  acc_k = (acc_{k-1} OR x_k) AND NOT(acc_{k-1} AND x_k)
+# using 3 intermediates (s{k}_and, s{k}_or, s{k}_not) + the stage result s{k}.
+# Every intermediate gets a DISTINCT workspace offset (f13) so the CPU kernels
+# never alias (aliasing collapses the result, as seen when all shared offset 0).
+
+def _build_cpu_xor_body(n_inputs=2):
+    n = n_inputs
+    if n < 2:
+        raise ValueError(f"XOR needs >=2 inputs, got {n}")
+    ins, outp = _cpu_io(n)
+    mem = _cpu_mem_offsets(n)            # base layout (inputs, exsec, output reshape)
+    n_stages = n - 1
+
+    # The n-input And reshape plan REUSES offsets for inputs consumed immediately in
+    # a linear chain (e.g. b_rs and c_rs share a slot).  Chained XOR keeps every
+    # input reshape live until its stage, so each needs a DISTINCT offset.  Assign
+    # input reshapes to distinct slots; intermediates get slots above them.
+    rs_off = {}
+    for i, nm in enumerate(ins):
+        rs_off[nm] = (i + 1) * _CPU_SLOT          # 64,128,192,... distinct per input
+
+    # Per-stage intermediate tensor names (3 per stage) + per-stage result name.
+    # The final stage writes directly into the output-reshape tensor (out_rs).
+    inter_names = []
+    stage_out = {}
+    for k in range(n_stages):
+        inter_names += [f"s{k}_and", f"s{k}_or", f"s{k}_not"]
+        if k < n_stages - 1:
+            sres = f"s{k}_res"
+            inter_names.append(sres)
+            stage_out[k] = sres
+        else:
+            stage_out[k] = f"{outp}_rs"
+
+    # Distinct, non-colliding workspace offsets for every intermediate, placed above
+    # all the (distinct) input-reshape slots.
+    base = (len(ins) + 2) * _CPU_SLOT
+    inter_off = {nm: base + i * _CPU_SLOT for i, nm in enumerate(inter_names)}
+
+    # ---- tensor index map (regcmd/task LAST for command-offset patching) ----
+    idx = {}
+    t = 0
+    idx["empty"] = t; t += 1
+    for nm in ins:
+        idx[f"{nm}_rsi1"] = t; t += 1
+    idx[f"{outp}_rsi1"] = t; t += 1
+    for nm in ins:
+        idx[nm] = t; t += 1
+    for nm in ins:
+        idx[f"{nm}_exsec"] = t; t += 1
+        idx[f"{nm}_rs"] = t; t += 1
+    for nm in inter_names:
+        idx[nm] = t; t += 1
+    idx[f"{outp}_rs"] = t; t += 1
+    idx[f"{outp}_rs_exsec"] = t; t += 1
+    idx[outp] = t; t += 1
+    idx["regcmd"] = t; t += 1
+    idx["task"] = t; t += 1
+
+    b = flatbuffers.Builder(65536)
+
+    # ---- nodes ----
+    noffs = []
+    for nm in ins:
+        noffs.append(_input_node(b, nm, idx[nm]))
+    for nm in ins:
+        noffs.append(_cpu_reshape_node(
+            b, f"{nm}_rs", nm,
+            [idx[nm], idx[f"{nm}_rsi1"], idx[f"{nm}_exsec"]], [idx[f"{nm}_rs"]]))
+    # XOR stages: acc starts as a_rs; fold in each subsequent input reshape.
+    acc = idx[f"{ins[0]}_rs"]
+    for k in range(n_stages):
+        x = idx[f"{ins[k + 1]}_rs"]
+        a_t, o_t, n_t = f"s{k}_and", f"s{k}_or", f"s{k}_not"
+        noffs.append(_op_node(b, 1, acc, x, idx[a_t], op="And"))
+        noffs.append(_op_node(b, 1, acc, x, idx[o_t], op="Or"))
+        noffs.append(_op_node(b, 1, 0, 0, idx[n_t], op="Not", in_idxs=[idx[a_t]]))
+        noffs.append(_op_node(b, 2, idx[o_t], idx[n_t], idx[stage_out[k]], op="And"))
+        acc = idx[stage_out[k]]
+    noffs.append(_cpu_reshape_node(
+        b, f"{outp}-rs", outp,
+        [idx[f"{outp}_rs"], idx[f"{outp}_rsi1"], idx[f"{outp}_rs_exsec"]], [idx[outp]]))
+    noffs.append(_cpu_output_node(b, outp, idx[outp]))
+
+    # ---- tensors ----
+    toffs = [None] * (idx["task"] + 1)
+    toffs[idx["task"]] = _cmd_tensor(b, "task", f2=10, f18=n + 3)
+    toffs[idx["regcmd"]] = _cmd_tensor(b, "regcmd", f2=9, f18=n + 2)
+    toffs[idx[outp]] = _cpu_ext_output(b, outp)
+    om = mem[f"{outp}-rs_exsec"]
+    toffs[idx[f"{outp}_rs_exsec"]] = _cpu_exsec(b, f"{outp}-rs_exSecondary", True, om[0], om[1])
+    om = mem[f"{outp}-rs"]
+    toffs[idx[f"{outp}_rs"]] = _cpu_rs(b, f"{outp}-rs", om[0], om[1])
+    for nm in inter_names:
+        toffs[idx[nm]] = _cpu_rs(b, nm, inter_off[nm], True)
+    for nm in reversed(ins):
+        toffs[idx[f"{nm}_rs"]] = _cpu_rs(b, f"{nm}_rs", rs_off[nm], True)
+        m = mem[f"{nm}_exsec"]
+        toffs[idx[f"{nm}_exsec"]] = _cpu_exsec(b, f"{nm}_exSecondary", False, m[0], m[1])
+    for nm in reversed(ins[1:]):
+        toffs[idx[nm]] = _cpu_ext_input(b, nm, *mem[nm])
+    toffs[idx[ins[0]]] = _cpu_ext_input(b, ins[0], *mem[ins[0]])
+    all_names = ins + [outp]
+    for i in range(n, -1, -1):
+        nm = all_names[i]
+        name_str = f"{nm}_rs_i1" if nm in ins else f"{outp}-rs_i1"
+        f12 = 16 if i == n else 32
+        toffs[idx[f"{nm}_rsi1"]] = _rsi1_tensor(b, name_str, i + 1, f12)
+    toffs[0] = _empty_tensor(b)
+
+    sg_vec = _build_cpu_subgraph(b, toffs, noffs, n, ins, outp, idx)
+
+    dtype_in = {nm: {"dtype": "bool", "layout": "UNDEFINED"} for nm in ins}
+    dtype_out = {outp: {"dtype": "bool", "layout": "NCHW"}}
+    fb = _emit_root_table(b, sg_vec, dtype_in, dtype_out,
+                          192 + (n - 2) * 64, 256 + (n - 2) * 64, _cpu_root_attrs(n))
+    fb_len = len(fb)
+
+    # RC + taskdesc are identical to the n-input And model (n+1 reshape/copy blocks).
+    rc_word_off = (HEADER_SIZE + fb_len) // 4
+    rc_ops = ["And"] * (n - 1)
+    rc_raw = rc_template_gen.build_template(n, ops=rc_ops, rc_word_off=rc_word_off)
+    if (len(rc_raw) // 4) % 2 != 0:
+        fb = fb + b"\x00" * 4
+        fb_len += 4
+        rc_word_off = (HEADER_SIZE + fb_len) // 4
+        rc_raw = rc_template_gen.build_template(n, ops=rc_ops, rc_word_off=rc_word_off)
+    taskdesc = _taskdesc_cpu(n, rc_word_off=rc_word_off)
+    full = fb + rc_raw + taskdesc
+    _patch_root_command_offsets(full, fb_len, rc_raw, len(rc_raw), taskdesc, n)
+    return bytes(full[:fb_len]), bytes(full[fb_len:])
+
+
 def _mixed_root_attrs():
     shape = [1, 4]
     attrs, quant = {}, {}
@@ -1771,8 +1990,140 @@ def _build_mixed_and_add_body(cpu_op="And", npu_op="Add"):
     return bytes(fb)
 
 
+def _build_mixed_xor_and_add_body(npu_op="Add"):
+    """FlatBuffer body for parallel fused-Xor CPU branch + one NPU EW branch.
+
+    CPU branch computes out1 = (a OR b) AND NOT(a AND b) using the same three
+    CPU reshape/copy blocks as the 2-input And/Or branch: a_rs, b_rs, out1-rs.
+    Thus the mixed RC schedule stays 3 CPU copy blocks + 6 NPU compute blocks;
+    only the FlatBuffer node/tensor graph grows by 3 CPU compute nodes and three
+    intermediate tensors.
+    """
+    n_t = 30
+    n_n = 17
+    b = flatbuffers.Builder(65536)
+
+    noffs = [None] * n_n
+    # CPU inputs and reshapes.
+    noffs[0] = _input_node(b, "a", 7)
+    noffs[1] = _input_node(b, "b", 8)
+    noffs[2] = _input_node(b, "x", 9)
+    noffs[3] = _input_node(b, "y", 10)
+    noffs[4] = _cpu_reshape_node(b, "a_rs", "a", [7, 1, 11], [12])
+    noffs[5] = _cpu_reshape_node(b, "b_rs", "b", [8, 2, 13], [14])
+    # Fused XOR CPU DAG.
+    noffs[6] = _op_node(b, 1, 12, 14, 15, op="And")
+    noffs[7] = _op_node(b, 1, 12, 14, 16, op="Or")
+    noffs[8] = _op_node(b, 1, 0, 0, 17, op="Not", in_idxs=[15])
+    noffs[9] = _op_node(b, 2, 16, 17, 18, op="And")
+    noffs[10] = _cpu_reshape_node(b, "out1-rs", "out1", [18, 3, 19], [20])
+    noffs[11] = _cpu_output_node(b, "out1", 20)
+    # NPU branch.
+    noffs[12] = _reshape_node(b, "x_rs", "x", [9, 4, 21], [22])
+    noffs[13] = _reshape_node(b, "y_rs", "y", [10, 5, 23], [24])
+    noffs[14] = _op_node(b, 1, 22, 24, 25, op=npu_op,
+                          npu_f10=_MIXED_NPU_F10, npu_f12=_MIXED_NPU_F12)
+    noffs[15] = _reshape_node(b, "out2-rs", "out2", [25, 6, 26], [27])
+    noffs[16] = _cpu_output_node(b, "out2", 27)
+
+    toffs = [None] * n_t
+    toffs[29] = _cmd_tensor(b, "task", f2=10, f18=8)
+    toffs[28] = _cmd_tensor(b, "regcmd", f2=9, f18=7)
+    toffs[27] = _ext_tensor(b, "out2", [1, 4], 64, f13=128, f2=2)
+    toffs[26] = _exsec_tensor(b, "out2-rs_exSecondary", [1, 1, 1, 4], 1, 64, f1=2)
+    toffs[25] = _rs_tensor(b, "out2-rs", [1, 1, 1, 4, 8], [1, 1, 1, 4], 64, 0,
+                            has_f13=False)
+    toffs[24] = _rs_tensor(b, "y_rs", [1, 1, 1, 4, 8], [1, 1, 1, 4], 64, 128,
+                            has_f13=True)
+    toffs[23] = _exsec_tensor(b, "y_exSecondary", [1, 4], 1, None, f1=None)
+    toffs[22] = _rs_tensor(b, "x_rs", [1, 1, 1, 4, 8], [1, 1, 1, 4], 64, 64,
+                            has_f13=True)
+    toffs[21] = _exsec_tensor(b, "x_exSecondary", [1, 4], 1, None, f1=None)
+    toffs[20] = _cpu_ext_output(b, "out1", f13=256)
+    toffs[19] = _cpu_exsec(b, "out1-rs_exSecondary", True, 64, True)
+    toffs[18] = _cpu_rs(b, "out1-rs", None, False)
+    # XOR intermediates: distinct workspace offsets above a_rs/b_rs (320/256).
+    toffs[17] = _cpu_rs(b, "t_not", 512, True)
+    toffs[16] = _cpu_rs(b, "t_or", 448, True)
+    toffs[15] = _cpu_rs(b, "t_and", 384, True)
+    toffs[14] = _cpu_rs(b, "b_rs", 256, True)
+    toffs[13] = _cpu_exsec(b, "b_exSecondary", False, None, False)
+    toffs[12] = _cpu_rs(b, "a_rs", 320, True)
+    toffs[11] = _cpu_exsec(b, "a_exSecondary", False, 256, True)
+    toffs[10] = _ext_tensor(b, "y", [1, 4], 8, f13=192, f2=1)
+    toffs[9] = _ext_tensor(b, "x", [1, 4], 8, f13=128, f2=1)
+    toffs[8] = _cpu_ext_input(b, "b", 64, True)
+    toffs[7] = _cpu_ext_input(b, "a", None, False)
+    toffs[6] = _rsi1_tensor(b, "out2-rs_i1", 7, 16)
+    toffs[5] = _rsi1_tensor(b, "y_rs_i1", 6, 32)
+    toffs[4] = _rsi1_tensor(b, "x_rs_i1", 5, 32)
+    toffs[3] = _rsi1_tensor(b, "out1-rs_i1", 4, 16)
+    toffs[2] = _rsi1_tensor(b, "b_rs_i1", 3, 32)
+    toffs[1] = _rsi1_tensor(b, "a_rs_i1", 2, 32)
+    toffs[0] = _empty_tensor(b)
+
+    tvec = _ovec(b, toffs)
+    nvec = _ovec(b, noffs)
+    sg_f4 = _ovec(b, [
+        _vec_table3(b, [0] * 10, [0x3f800000] * 10, list(range(10)))
+        for _ in range(4)
+    ])
+    cpu_f7 = [
+        _cpu_sg_f7_entry(b, "a", 55),
+        _cpu_sg_f7_entry(b, "a_rs", 5),
+        _cpu_sg_f7_entry(b, "b", 135),
+        _cpu_sg_f7_entry(b, "b_rs", 85),
+        _cpu_sg_f7_entry(b, "out1", 165),
+        _cpu_sg_f7_entry(b, "out1-rs", 215),
+    ]
+    npu_bases = {"out2-rs": 5, "x_rs": 55, "y_rs": 61}
+    npu_f7 = []
+    for nm, base in npu_bases.items():
+        pairs = [(_MIXED_NPU_IO_OFF[i], base + i * 80 + _MIXED_CPU_SHIFT)
+                 for i in range(6)]
+        npu_f7.append(_str_vec_table3(b, nm, pairs, list(_MIXED_NPU_IO_MASK)))
+    sg_f7 = _ovec(b, cpu_f7 + npu_f7)
+    sg_f10 = _vec(b, [0, 0, 0, 4, 9])
+    sg_f12 = _ovec(b, [_str_scalar_table2(b, "out1", 3),
+                        _str_scalar_table2(b, "out2", 4)])
+    sg_f2 = _vec(b, [7, 8, 9, 10])
+    sg_f3 = _vec(b, [20, 27])
+    evs = [_ev(b) for _ in range(7)]
+    b.StartObject(17)
+    b.PrependUOffsetTRelativeSlot(16, evs[0], 0)
+    b.PrependUOffsetTRelativeSlot(15, evs[1], 0)
+    b.PrependUOffsetTRelativeSlot(14, evs[2], 0)
+    b.PrependUOffsetTRelativeSlot(13, evs[3], 0)
+    b.PrependUOffsetTRelativeSlot(12, sg_f12, 0)
+    b.PrependUOffsetTRelativeSlot(10, sg_f10, 0)
+    b.PrependUOffsetTRelativeSlot(9, evs[4], 0)
+    b.PrependUOffsetTRelativeSlot(8, evs[5], 0)
+    b.PrependUOffsetTRelativeSlot(7, sg_f7, 0)
+    b.PrependUOffsetTRelativeSlot(6, evs[6], 0)
+    b.PrependUOffsetTRelativeSlot(4, sg_f4, 0)
+    b.PrependUOffsetTRelativeSlot(3, sg_f3, 0)
+    b.PrependUOffsetTRelativeSlot(2, sg_f2, 0)
+    b.PrependUOffsetTRelativeSlot(1, nvec, 0)
+    b.PrependUOffsetTRelativeSlot(0, tvec, 0)
+    sg = b.EndObject()
+    b.StartVector(4, 1, 4)
+    b.PrependUOffsetTRelative(sg)
+    sg_vec = b.EndVector()
+
+    dtype_in = {"a": {"dtype": "bool", "layout": "UNDEFINED"},
+                "b": {"dtype": "bool", "layout": "UNDEFINED"},
+                "x": {"dtype": "float16", "layout": "UNDEFINED"},
+                "y": {"dtype": "float16", "layout": "UNDEFINED"}}
+    dtype_out = {"out1": {"dtype": "bool", "layout": "NCHW"},
+                 "out2": {"dtype": "float16", "layout": "NCHW"}}
+    fb = _emit_root_table(b, sg_vec, dtype_in, dtype_out, 384, 384,
+                          _mixed_root_attrs())
+    return bytes(fb)
+
+
 def build_mixed_and_add(cpu_op="And", npu_op="Add", ref_rc_path=None):
-    fb_bytes = _build_mixed_and_add_body(cpu_op, npu_op)
+    fb_bytes = (_build_mixed_xor_and_add_body(npu_op) if cpu_op == "Xor"
+                else _build_mixed_and_add_body(cpu_op, npu_op))
     ref_name = "_ref_parallel_and_add.rknn"
     ref_path = ref_rc_path or str(Path(__file__).resolve().parent / ref_name)
     ref_data = Path(ref_path).read_bytes()
@@ -1787,7 +2138,7 @@ def build_mixed_and_add(cpu_op="And", npu_op="Add", ref_rc_path=None):
     vt_file = root_file - i32f(root_file)
     rc_off = u32f(root_file + u16f(vt_file + 4 + 20 * 2))
     task_off = u32f(root_file + u16f(vt_file + 4 + 21 * 2))
-    ref_rc = ref_data[rc_off:task_off]
+    ref_rc = _patch_mixed_npu_op(ref_data[rc_off:task_off], npu_op)
     ref_taskdesc = ref_data[task_off:HEADER_SIZE + body_size]
 
     fb_len = len(fb_bytes)
@@ -1800,6 +2151,63 @@ def build_mixed_and_add(cpu_op="And", npu_op="Add", ref_rc_path=None):
     _patch_root_command_offsets(full, fb_len, ref_rc, len(ref_rc),
                                 ref_taskdesc, 5)
     return bytes(full[:fb_len]), bytes(full[fb_len:])
+
+
+def _patch_mixed_npu_op(rc, npu_op):
+    """Patch the NPU compute blocks of a mixed RC stream to compute `npu_op`.
+
+    The reference RC was built for Add; the per-op DPU/RDMA registers (EW_CFG
+    0x4070, DPU_OUT_RES 0x4084, RDMA_BN_MUL 0x5044) must be rewritten to match
+    Sub/Mul/Div.  Compute blocks are identified by 0x4070 != the copy value 0x383
+    (copy blocks keep 0x383).  Returns a new bytes object.
+    """
+    op_id = rc_template_gen.ew_op_id(npu_op)
+    cfg = rc_template_gen._EW_CFG[op_id]
+    out_res = rc_template_gen._DPU_OUT_RES.get(op_id, 0x00010001)
+    bn_mul = rc_template_gen._RDMA_BN_MUL.get(op_id, 0x00017849)
+    reg_to_val = {0x4070: cfg, 0x4084: out_res, 0x5044: bn_mul}
+    COPY_CFG = rc_template_gen._EW_CFG[rc_template_gen.EW_OP_COPY]   # 0x383 (copy block)
+    KNOWN_CFGS = set(rc_template_gen._EW_CFG.values())
+    buf = bytearray(rc)
+    n = len(buf)
+
+    # Pass 1: find compute-block extents.  Mixed RC streams are u32-aligned, so the
+    # 64-bit register words may start at byte phase 0 or 4 depending on the prefix
+    # alignment.  Each block spans from one DPU 0x4070 write to the next; copy
+    # blocks carry 0x383 and compute blocks carry an EW op cfg.
+    phase_marks = []
+    for phase in (0, 4):
+        marks = []   # (byte_index_of_0x4070_write, is_compute)
+        for i in range(phase, n - 8 + 1, 8):
+            w = struct.unpack_from("<Q", buf, i)[0]
+            tgt = (w >> 48) & 0xFFFF
+            reg = w & 0xFFFF
+            val = (w >> 16) & 0xFFFFFFFF
+            if tgt == rc_template_gen._DPU and reg == 0x4070 and val in KNOWN_CFGS:
+                marks.append((i, val != COPY_CFG))
+        phase_marks.append(marks)
+    marks = max(phase_marks, key=len)
+
+    if npu_op != "Add" and not any(is_c for _, is_c in marks):
+        raise ValueError("no mixed NPU compute blocks found to patch")
+
+    bounds = []
+    for k, (start, is_c) in enumerate(marks):
+        end = marks[k + 1][0] if k + 1 < len(marks) else n
+        if is_c:
+            bounds.append((start, end))
+
+    # Pass 2: within each compute block, rewrite the per-op registers.
+    for (start, end) in bounds:
+        for i in range(start, end - 8 + 1, 8):
+            w = struct.unpack_from("<Q", buf, i)[0]
+            reg = w & 0xFFFF
+            if reg in reg_to_val:
+                # Preserve the command target (top 16 bits) and register (low 16
+                # bits); replace only the 32-bit payload in bits 16..47.
+                struct.pack_into("<Q", buf, i,
+                                 (w & 0xFFFF00000000FFFF) | (reg_to_val[reg] << 16))
+    return bytes(buf)
 
 
 def _make_trailer(rows, cols, n_inputs, body=None):
@@ -1893,6 +2301,21 @@ def build_body_scratch(N, n_inputs):
 
 
 def _build_body_scratch_flatbuffers(N, n_inputs, ops=None, dtype="float16"):
+    # Fused XOR (n inputs, parity): chained (a OR b) AND NOT(a AND b) CPU DAG.
+    _op_list = ops if isinstance(ops, (list, tuple)) else [ops]
+    if n_inputs >= 2 and _op_list and _op_list[0] == "Xor":
+        fb_part, rc_part = _build_cpu_xor_body(n_inputs)
+        return fb_part + rc_part
+
+    # Unary CPU op (1 input, e.g. Not): distinct single-input topology.
+    if n_inputs == 1:
+        unary = [o for o in (ops if isinstance(ops, (list, tuple)) else [ops]) if o]
+        if unary and all(rc_template_gen.is_unary_cpu_op(o) for o in unary):
+            fb_part, rc_part = _build_cpu_unary_body(unary[0])
+            return fb_part + rc_part
+        raise NotImplementedError(
+            f"n_inputs=1 is only supported for unary CPU ops; got ops={ops}")
+
     n_adds_check = max(1, n_inputs - 1)
     op_names = rc_template_gen._normalize_ops(n_adds_check, ops)
     if op_names and all(rc_template_gen.is_cpu_op(o) for o in op_names):
