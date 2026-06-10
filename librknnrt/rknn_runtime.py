@@ -320,23 +320,50 @@ def _nc1hwc2_to_contiguous(packed, native_shape, dtype, stride_atoms=None):
     return np.array(result, dtype=dtype)
 
 # ── CPU Op Kernels ───────────────────────────────────────────────────────────
-def _not_kernel(inputs):
+# Unified kernel table for both the RKNN CPU-fallback ops (And/Or/Not/...) and
+# the uop-graph ONNX ops. All kernels take (inputs, attrs={}); attrs carries
+# ONNX attributes (BitShift direction, Cast target, Concat axis, ...).
+def _not_kernel(inputs, attrs={}):
     a = inputs[0]
+    # bitwise_not on bool == logical not; the uint-view trick is float-only.
     if a.dtype.kind == 'f':
         return np.bitwise_not(a.view('u' + str(a.dtype.itemsize))).view(a.dtype)
     return np.bitwise_not(a)
 
+_ONNX_CAST = {1: np.float32, 4: np.uint16, 6: np.int32, 7: np.int64, 9: np.bool_, 10: np.float16, 12: np.uint32, 13: np.uint64}
+
+# Op types the toolkit-free NPU EW path could service today (fp16 only).
+UOP_NPU_SUPPORTED = {"Add", "Sub", "Mul", "Div"}
+
 CPU_KERNELS = {
-    "Add": lambda inputs: inputs[0] + inputs[1],
-    "Sub": lambda inputs: inputs[0] - inputs[1],
-    "Mul": lambda inputs: inputs[0] * inputs[1],
-    "Div": lambda inputs: inputs[0] / inputs[1],
-    "And": lambda inputs: np.bitwise_and(inputs[0], inputs[1]),
-    "Or":  lambda inputs: np.bitwise_or(inputs[0], inputs[1]),
-    "Xor": lambda inputs: np.bitwise_xor(inputs[0], inputs[1]),
-    "Not": _not_kernel,
-    "Neg": lambda inputs: -inputs[0],
+    "Add":        lambda i, a={}: i[0] + i[1],
+    "Sub":        lambda i, a={}: i[0] - i[1],
+    "Mul":        lambda i, a={}: i[0] * i[1],
+    "Div":        lambda i, a={}: i[0] / i[1],
+    "Mod":        lambda i, a={}: i[0] % i[1],
+    "Neg":        lambda i, a={}: -i[0],
+    # bitwise ops; identical to logical ops on bool arrays
+    "And":        lambda i, a={}: np.bitwise_and(i[0], i[1]),
+    "Or":         lambda i, a={}: np.bitwise_or(i[0], i[1]),
+    "Xor":        lambda i, a={}: np.bitwise_xor(i[0], i[1]),
+    "Not":        _not_kernel,
+    "BitwiseAnd": lambda i, a={}: np.bitwise_and(i[0], i[1]),
+    "BitwiseOr":  lambda i, a={}: np.bitwise_or(i[0], i[1]),
+    "BitwiseXor": lambda i, a={}: np.bitwise_xor(i[0], i[1]),
+    "BitShift":   lambda i, a={}: (i[0] << i[1]) if a.get("direction") == "LEFT" else (i[0] >> i[1]),
+    # comparisons / dtype / shape
+    "Equal":      lambda i, a={}: i[0] == i[1],
+    "Less":       lambda i, a={}: i[0] < i[1],
+    "Cast":       lambda i, a={}: i[0].astype(_ONNX_CAST[a["to"]]),
+    "Gather":     lambda i, a={}: np.take(i[0], i[1].astype(np.int64), axis=a.get("axis", 0)),
+    "Concat":     lambda i, a={}: np.concatenate(i, axis=a.get("axis", 0)),
+    "Identity":   lambda i, a={}: i[0],
+    "Reshape":    lambda i, a={}: i[0].reshape(i[1].astype(np.int64)),
 }
+
+# RKNN graph scheduling treats these as structural (NPU COPY / IO), never as
+# CPU compute ops, even though CPU_KERNELS has a Reshape kernel for uop graphs.
+RKNN_GRAPH_CPU_OPS = set(CPU_KERNELS) - {"Reshape", "Identity", "Gather", "Concat", "Cast"}
 
 # ── DMA Address Patching ────────────────────────────────────────────────────
 REG_DST_BASE  = 0x4020  # DPU_DST_BASE_ADDR
@@ -380,6 +407,8 @@ class RKNNRuntime:
         self._alu_input_arrays = []
         self._alu_input_shapes = []
         self._alu_result = None
+        self._uop = None
+        self._npu_ew = None
         self._init()
 
     def _init(self):
@@ -387,6 +416,38 @@ class RKNNRuntime:
         tensors = m["tensors"]
         nodes = m["nodes"]
         blocks = m["blocks"]
+
+        # ── uop-graph models (node-per-op export, trailer-flagged) ──
+        # Same dispatch pattern as the COPY/EW graph paths below: detect the
+        # model kind, set up its executor state, and return.
+        body_size = struct.unpack_from("<Q", self.raw, 0x10)[0]
+        off = HEADER_SIZE + body_size
+        if off + 8 <= len(self.raw):
+            tlen = struct.unpack_from("<Q", self.raw, off)[0]
+            try:
+                import json
+                trailer = json.loads(self.raw[off + 8: off + 8 + tlen])
+            except Exception:
+                trailer = None
+            if isinstance(trailer, dict) and trailer.get("uop_graph"):
+                self._uop = trailer
+                self._uop_inputs = [n.outputs[0] for n in nodes if n.op == "InputOperator"]
+                self._uop_outputs = [n.inputs[0] for n in nodes if n.op == "OutputOperator"]
+                self._uop_values = {int(ti): np.array(c["data"], dtype=np.dtype(c["dtype"]))
+                                    for ti, c in trailer["consts"].items()}
+                # Optional companion fp16 EW model: its baked register blocks
+                # let NPU-supported fp16 ops execute on the NPU (hybrid).
+                ew_path = trailer.get("npu_ew_model")
+                if ew_path and os.path.exists(ew_path):
+                    self._npu_ew = RKNNRuntime(ew_path)
+                op_types = sorted({n.op for n in nodes if n.op not in ("InputOperator", "OutputOperator")})
+                npu_ok = [o for o in op_types if o in UOP_NPU_SUPPORTED]
+                cpu_only = [o for o in op_types if o not in UOP_NPU_SUPPORTED]
+                print(f"UopGraph executor: {len(nodes)} nodes, {len(self._uop_values)} consts, "
+                      f"npu_ew={'yes' if self._npu_ew else 'no'}")
+                print(f"  NPU ops (fp16 EW): {npu_ok}")
+                print(f"  CPU ops: {cpu_only}")
+                return
 
         # Classify tensors
         for t in tensors:
@@ -440,7 +501,7 @@ class RKNNRuntime:
         self._cpu_ops = cpu_ops
 
         all_copy = all(blk.kind == "COPY" for blk in blocks) if blocks else False
-        has_cpu_ops = any(n.op in CPU_KERNELS for n in nodes)
+        has_cpu_ops = any(n.op in RKNN_GRAPH_CPU_OPS for n in nodes)
         if all_copy and has_cpu_ops:
             self._graph = True
             self._all_cpu = False
@@ -699,7 +760,7 @@ class RKNNRuntime:
         for n in nodes:
             if n.op in ("InputOperator", "OutputOperator"):
                 continue
-            if n.op in CPU_KERNELS:
+            if n.op in RKNN_GRAPH_CPU_OPS:
                 continue
             if bi < len(blocks):
                 block_to_node[bi] = n
@@ -739,7 +800,7 @@ class RKNNRuntime:
         for n in nodes:
             if n.op in ("InputOperator", "OutputOperator"):
                 continue
-            if n.op in CPU_KERNELS:
+            if n.op in RKNN_GRAPH_CPU_OPS:
                 if pending_tasks > 0:
                     schedule.append(("npu", task_start, pending_tasks))
                     task_start += pending_tasks
@@ -776,7 +837,7 @@ class RKNNRuntime:
 
         self._graph_dtype = self._detect_model_dtype()
 
-        cpu_op_names = set(CPU_KERNELS.keys())
+        cpu_op_names = set(RKNN_GRAPH_CPU_OPS)
         copy_block_indices = set()
         for bi, blk in enumerate(blocks):
             if blk.kind == "COPY":
@@ -1199,6 +1260,10 @@ class RKNNRuntime:
 
     def inputs_set(self, input_arrays):
         """Write input data into the model (contiguous → NC1HWC2 + DMA patching)."""
+        if self._uop is not None:
+            for ti, arr in zip(self._uop_inputs, input_arrays):
+                self._uop_values[ti] = np.asarray(arr).ravel()
+            return
         if self._graph:
             return self._inputs_set_graph(input_arrays)
 
@@ -1294,6 +1359,30 @@ class RKNNRuntime:
 
     def run(self):
         """Execute the model: NPU submit or CPU fallback."""
+        if self._uop is not None:
+            # uop graph: per-node dispatch. fp16 EW-supported ops go to the NPU
+            # via the companion EW model's baked register blocks; the rest run
+            # on CPU kernels.
+            attrs_map = self._uop.get("node_attrs", {})
+            self._uop_exec_log = []
+            for ni, n in enumerate(self.model["nodes"]):
+                if n.op in ("InputOperator", "OutputOperator"):
+                    continue
+                ins = [self._uop_values[ti] for ti in n.inputs]
+                if (self._npu_ew is not None and n.op in UOP_NPU_SUPPORTED
+                        and len(ins) == 2 and all(getattr(a, 'dtype', None) == np.float16 for a in ins)):
+                    self._npu_ew.inputs_set([ins[0], ins[1]])
+                    self._npu_ew.run()
+                    out = self._npu_ew.outputs_get()[0][:ins[0].size]
+                    self._uop_exec_log.append((n.op, "NPU"))
+                else:
+                    kernel = CPU_KERNELS.get(n.op)
+                    if kernel is None:
+                        raise NotImplementedError(f"uop graph op {n.op} (node {ni}) has no CPU kernel")
+                    out = kernel(ins, attrs_map.get(str(ni), {}))
+                    self._uop_exec_log.append((n.op, "CPU"))
+                self._uop_values[n.outputs[0]] = out
+            return
         if self._graph:
             return self._run_graph()
         if self._alu_fallback:
@@ -1449,6 +1538,8 @@ class RKNNRuntime:
         return None, None, None
 
     def outputs_get(self):
+        if self._uop is not None:
+            return [self._uop_values[ti] for ti in self._uop_outputs]
         if self._graph:
             return self._outputs_get_graph()
         if self._alu_fallback and self._alu_result is not None:
