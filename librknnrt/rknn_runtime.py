@@ -370,6 +370,10 @@ class RKNNRuntime:
         self._cpu_ops = []
         self._input_tensors = []
         self._output_tensors = []
+        self._alu_fallback = False
+        self._alu_input_arrays = []
+        self._alu_input_shapes = []
+        self._alu_result = None
         self._init()
 
     def _init(self):
@@ -435,6 +439,14 @@ class RKNNRuntime:
             self._graph = True
             self._all_cpu = False
             self._init_graph()
+            return
+
+        has_copy = any(blk.kind == "COPY" for blk in blocks)
+        has_ew = any(blk.kind == "EW_BINARY" for blk in blocks)
+        if has_copy and has_ew and has_cpu_ops:
+            self._graph = True
+            self._all_cpu = False
+            self._init_graph_hybrid()
             return
 
         # Element-wise ops (Add/Sub/Mul/Div) whose baked blocks are fp16/int8 run
@@ -740,6 +752,256 @@ class RKNNRuntime:
         print(f"  data_tensors: {sorted(data_tensor_indices)}")
         print(f"  schedule: {[(s[0], s[1].op if s[0]=='cpu' else f'tasks {s[1]}-{s[1]+s[2]-1}') for s in schedule]}")
 
+    def _init_graph_hybrid(self):
+        m = self.model
+        tensors = m["tensors"]
+        nodes = m["nodes"]
+        blocks = m["blocks"]
+
+        self._input_tensors = []
+        self._output_tensors = []
+        for n in nodes:
+            if n.op == "InputOperator":
+                for ti in n.outputs:
+                    self._input_tensors.append(tensors[ti])
+            elif n.op == "OutputOperator":
+                for ti in n.inputs:
+                    self._output_tensors.append(tensors[ti])
+
+        self._graph_dtype = self._detect_model_dtype()
+
+        cpu_op_names = set(CPU_KERNELS.keys())
+        copy_block_indices = set()
+        for bi, blk in enumerate(blocks):
+            if blk.kind == "COPY":
+                copy_block_indices.add(bi)
+        ew_block_start = min(bi for bi in range(len(blocks)) if blocks[bi].kind == "EW_BINARY") if any(blocks[bi].kind == "EW_BINARY" for bi in range(len(blocks))) else len(blocks)
+
+        copy_reshape_outputs = set()
+        bi = 0
+        for n in nodes:
+            if n.op in ("InputOperator", "OutputOperator"):
+                continue
+            if n.op == "Reshape" and bi in copy_block_indices:
+                for ti in n.outputs:
+                    copy_reshape_outputs.add(ti)
+                bi += 1
+            elif n.op == "Reshape":
+                bi += 1
+
+        cpu_nodes = []
+        npu_ew_nodes = []
+        for n in nodes:
+            if n.op in ("InputOperator", "OutputOperator", "Reshape"):
+                continue
+            has_copy_input = any(ti in copy_reshape_outputs for ti in n.inputs)
+            if has_copy_input:
+                cpu_nodes.append(n)
+            else:
+                npu_ew_nodes.append(n)
+
+        data_tensor_indices = set()
+        for n in nodes:
+            if n.op == "InputOperator":
+                data_tensor_indices.update(n.outputs)
+            elif n.op == "OutputOperator":
+                data_tensor_indices.update(n.inputs)
+            else:
+                data_tensor_indices.update(n.outputs)
+
+        self._tensor_bufs = {}
+        for ti in sorted(data_tensor_indices):
+            t = tensors[ti]
+            sz = max(t.size or 0, 4096)
+            buf, mc = self.dev.mem_alloc(sz, RKNPU_MEM_KERNEL_MAPPING)
+            t._dma_addr = mc.dma_addr
+            t._buf = buf
+            self._tensor_bufs[ti] = (buf, mc)
+
+        self._model_buf, self._model_mc = self.dev.mem_alloc(
+            max(len(self.raw), 4096), RKNPU_MEM_KERNEL_MAPPING)
+        mv = memoryview(self._model_buf)
+        mv[:len(self.raw)] = self.raw
+
+        n_tasks = len(blocks)
+        task_size = max(n_tasks * 40, 4096)
+        self._task_buf, self._task_mc = self.dev.mem_alloc(task_size, RKNPU_MEM_KERNEL_MAPPING)
+        self._tasks = ctypes.cast(
+            ctypes.addressof(ctypes.c_char.from_buffer(self._task_buf)),
+            ctypes.POINTER(rknpu_task))
+        for i, blk in enumerate(blocks):
+            self._tasks[i].flags = 0
+            self._tasks[i].op_idx = 4
+            self._tasks[i].enable_mask = 0x18
+            self._tasks[i].int_mask = 0x300
+            self._tasks[i].int_clear = 0x1ffff
+            self._tasks[i].int_status = 0
+            self._tasks[i].regcfg_amount = blk.n_words
+            self._tasks[i].regcfg_offset = 0
+            self._tasks[i].regcmd_addr = self._model_mc.dma_addr + HEADER_SIZE + blk.word_offset * 8
+        self._n_tasks = n_tasks
+        self._blocks = blocks
+
+        copy_nodes = []
+        bi = 0
+        for n in nodes:
+            if n.op in ("InputOperator", "OutputOperator"):
+                continue
+            if n.op in cpu_op_names:
+                continue
+            if n.op in ("Reshape",):
+                if bi < len(blocks) and blocks[bi].kind == "COPY":
+                    copy_nodes.append((bi, n))
+                    bi += 1
+                else:
+                    bi += 1
+            elif n.op in ("Add", "Sub", "Mul", "Div") and blocks[bi].kind == "EW_BINARY":
+                bi += 1
+
+        hdr_qwords = HEADER_SIZE // 8
+        model_view = (ctypes.c_uint64 * (len(self.raw) // 8)).from_buffer(self._model_buf)
+        for bi_copy, node in copy_nodes:
+            blk = blocks[bi_copy]
+            data_inputs = [ti for ti in node.inputs if ti in data_tensor_indices]
+            data_outputs = [ti for ti in node.outputs if ti in data_tensor_indices]
+            if not data_inputs or not data_outputs:
+                continue
+            src_ti = data_inputs[0]
+            dst_ti = data_outputs[0]
+            src_addr = tensors[src_ti]._dma_addr
+            dst_addr = tensors[dst_ti]._dma_addr
+            for wi in range(blk.n_words):
+                abs_idx = hdr_qwords + blk.word_offset + wi
+                w = model_view[abs_idx]
+                target = (w >> 48) & 0xFFFF
+                reg = w & 0xFFFF
+                old_val = (w >> 16) & 0xFFFFFFFF
+                if target == RDMA_TARGET and reg == REG_RDMA_SRC:
+                    model_view[abs_idx] = (target << 48) | (((src_addr + old_val) & 0xFFFFFFFF) << 16) | reg
+                elif target == DPU_TARGET and reg == REG_DST_BASE:
+                    model_view[abs_idx] = (target << 48) | (((dst_addr + old_val) & 0xFFFFFFFF) << 16) | reg
+
+        ew_node = npu_ew_nodes[0] if npu_ew_nodes else None
+        if ew_node:
+            ew_inputs = [ti for ti in ew_node.inputs if ti in data_tensor_indices]
+            ew_outputs = [ti for ti in ew_node.outputs if ti in data_tensor_indices]
+            x_rs_addr = tensors[ew_inputs[0]]._dma_addr if len(ew_inputs) > 0 else 0
+            y_rs_addr = tensors[ew_inputs[1]]._dma_addr if len(ew_inputs) > 1 else 0
+            z_rs_addr = tensors[ew_outputs[0]]._dma_addr if len(ew_outputs) > 0 else 0
+            ew_start = len(copy_nodes)
+            for blk in blocks[ew_start:]:
+                if blk.kind != "EW_BINARY":
+                    continue
+                for wi in range(blk.n_words):
+                    abs_idx = hdr_qwords + blk.word_offset + wi
+                    w = model_view[abs_idx]
+                    target = (w >> 48) & 0xFFFF
+                    reg = w & 0xFFFF
+                    old_val = (w >> 16) & 0xFFFFFFFF
+                    if target == RDMA_TARGET and reg == REG_RDMA_SRC:
+                        model_view[abs_idx] = (target << 48) | (((x_rs_addr + old_val) & 0xFFFFFFFF) << 16) | reg
+                    elif target == RDMA_TARGET and reg == REG_RDMA_EW:
+                        model_view[abs_idx] = (target << 48) | (((y_rs_addr + old_val) & 0xFFFFFFFF) << 16) | reg
+                    elif target == DPU_TARGET and reg == REG_DST_BASE:
+                        model_view[abs_idx] = (target << 48) | (((z_rs_addr + old_val) & 0xFFFFFFFF) << 16) | reg
+
+        ew_block_count = len(blocks) - ew_block_start
+        ew_ping = ew_block_count // 2 if ew_block_count >= 2 else ew_block_count
+        self._hybrid_ew_start = ew_block_start
+        self._hybrid_ew_ping = ew_ping
+
+        copy_block_to_node = {}
+        for bi_copy, node in copy_nodes:
+            copy_block_to_node[bi_copy] = node
+
+        cpu_node_set = {n.idx for n in cpu_nodes}
+        ew_node_set = {n.idx for n in npu_ew_nodes}
+
+        schedule = []
+        copy_queue = []
+        ew_emitted = False
+        for n in nodes:
+            if n.op in ("InputOperator", "OutputOperator"):
+                continue
+            if n.idx in cpu_node_set:
+                if copy_queue:
+                    copy_queue.sort()
+                    schedule.append(("npu_copy", copy_queue[0], len(copy_queue)))
+                    copy_queue = []
+                schedule.append(("cpu", n))
+            elif n.idx in ew_node_set and not ew_emitted:
+                if copy_queue:
+                    copy_queue.sort()
+                    schedule.append(("npu_copy", copy_queue[0], len(copy_queue)))
+                    copy_queue = []
+                schedule.append(("npu_ew", ew_block_start, 1))
+                ew_emitted = True
+            elif n.op == "Reshape":
+                for bi, bn in copy_block_to_node.items():
+                    if bn.idx == n.idx and bi not in copy_queue:
+                        copy_queue.append(bi)
+                        break
+        if copy_queue:
+            schedule.append(("npu_copy", copy_queue[0], len(copy_queue)))
+        if not ew_emitted and ew_block_count > 0:
+            schedule.append(("npu_ew", ew_block_start, 1))
+
+        self._graph_schedule = schedule
+
+        npu_input_rs = {}
+        if ew_node:
+            for ti in ew_node.inputs:
+                if ti in data_tensor_indices:
+                    rs_t = tensors[ti]
+                    for n in nodes:
+                        if n.op == "Reshape":
+                            d_ins = [x for x in n.inputs if x in data_tensor_indices]
+                            if d_ins and d_ins[0] != ti and n.outputs and n.outputs[0] == ti:
+                                npu_input_rs[d_ins[0]] = ti
+                    for n in nodes:
+                        if n.op == "InputOperator" and ti not in [o for nn in nodes if nn.op == "InputOperator" for o in nn.outputs]:
+                            for nn in nodes:
+                                if nn.op == "Reshape":
+                                    d_ins = [x for x in nn.inputs if x in data_tensor_indices]
+                                    if d_ins and nn.outputs and nn.outputs[0] == ti:
+                                        src_ti = d_ins[0]
+                                        npu_input_rs[src_ti] = ti
+
+        npu_input_rs_final = {}
+        for src_ti, rs_ti in npu_input_rs.items():
+            rs_t = tensors[rs_ti]
+            if rs_t.native and len(rs_t.native) >= 5 and rs_t.native[4] == 8:
+                npu_input_rs_final[src_ti] = rs_ti
+        self._npu_input_rs = npu_input_rs_final
+
+        self._rs_bufs = {}
+        for src_ti, rs_ti in npu_input_rs_final.items():
+            rs_t = tensors[rs_ti]
+            self._rs_bufs[rs_t.name] = (rs_t._buf, None, rs_t)
+        if ew_node:
+            z_rs_ti = ew_outputs[0] if ew_outputs else None
+            if z_rs_ti is not None:
+                z_rs_t = tensors[z_rs_ti]
+                self._rs_bufs[z_rs_t.name] = (z_rs_t._buf, None, z_rs_t)
+
+        self._npu_stride = None
+        for blk in blocks:
+            if blk.kind == "EW_BINARY":
+                for w in blk.words:
+                    target = (w >> 48) & 0xFFFF
+                    reg = w & 0xFFFF
+                    val = (w >> 16) & 0xFFFFFFFF
+                    if target == DPU_TARGET and reg == 0x4024:
+                        self._npu_stride = val
+                        break
+                break
+
+        print(f"Hybrid executor: {len(copy_nodes)} COPY + {ew_block_count} EW_BINARY blocks, "
+              f"{len(cpu_nodes)} CPU ops")
+        print(f"  inputs:  {[t.name for t in self._input_tensors]}")
+        print(f"  outputs: {[t.name for t in self._output_tensors]}")
+        print(f"  schedule: {[(s[0], s[1].op if s[0]=='cpu' else f'blk {s[1]}-{s[1]+s[2]-1}') for s in schedule]}")
+
     def _inputs_set_graph(self, input_arrays):
         for i, arr in enumerate(input_arrays):
             arr = np.asarray(arr)
@@ -754,12 +1016,31 @@ class RKNNRuntime:
             ct[:n_bytes] = packed.tobytes() if isinstance(packed, np.ndarray) else bytes(packed)
             mc = self._tensor_bufs[t.idx][1]
             self.dev.mem_sync(mc.handle, mc.size)
-        self._graph_user_dtype = input_arrays[0].dtype if input_arrays else self._graph_dtype
+
+        if hasattr(self, '_npu_input_rs') and self._npu_input_rs:
+            for src_ti, rs_ti in self._npu_input_rs.items():
+                src_idx = None
+                for i, it in enumerate(self._input_tensors):
+                    if it.idx == src_ti:
+                        src_idx = i
+                        break
+                if src_idx is None or src_idx >= len(input_arrays):
+                    continue
+                arr = np.asarray(input_arrays[src_idx])
+                rs_t = self.model["tensors"][rs_ti]
+                packed = _contiguous_to_nc1hwc2(arr, rs_t.native, self._stride_for(rs_t))
+                n_bytes = packed.nbytes if isinstance(packed, np.ndarray) else len(packed)
+                rs_buf = rs_t._buf
+                ct = (ctypes.c_uint8 * n_bytes).from_buffer(rs_buf)
+                ct[:n_bytes] = packed.tobytes() if isinstance(packed, np.ndarray) else bytes(packed)
+
+        self._graph_user_dtypes = [a.dtype for a in input_arrays] if input_arrays else [self._graph_dtype]
+        self._graph_user_dtype = self._graph_user_dtypes[0]
 
     def _run_graph(self):
         tensors = self.model["tensors"]
         for item in self._graph_schedule:
-            if item[0] == "npu":
+            if item[0] == "npu" or item[0] == "npu_copy":
                 _, start, count = item
                 for ti in range(start, start + count):
                     blk = self._blocks[ti]
@@ -767,6 +1048,13 @@ class RKNNRuntime:
                                                    + HEADER_SIZE + blk.word_offset * 8)
                     self._tasks[0].regcfg_amount = blk.n_words
                     self.dev.submit(self._task_mc.obj_addr, 0, 1)
+            elif item[0] == "npu_ew":
+                ew_start = self._hybrid_ew_start
+                ew_ping = self._hybrid_ew_ping
+                self._tasks[0].regcmd_addr = (self._model_mc.dma_addr
+                                               + HEADER_SIZE + self._blocks[ew_start].word_offset * 8)
+                self._tasks[0].regcfg_amount = self._blocks[ew_start].n_words
+                self.dev.submit(self._task_mc.obj_addr, 0, ew_ping)
             elif item[0] == "cpu":
                 _, node = item
                 self._execute_graph_cpu_op(node, tensors)
@@ -776,6 +1064,15 @@ class RKNNRuntime:
         if kernel is None:
             return
         dtype = self._graph_user_dtype if hasattr(self, '_graph_user_dtype') else self._graph_dtype
+        data_inputs = [ti for ti in node.inputs if ti in self._tensor_bufs]
+        if data_inputs:
+            rs_ti = data_inputs[0]
+            rs_t = tensors[rs_ti]
+            if rs_t.native and len(rs_t.native) >= 5:
+                c2 = rs_t.native[4]
+                if c2 == 8: dtype = np.float16
+                elif c2 == 4: dtype = np.int32
+                elif c2 == 1: dtype = np.int8
         dt = np.dtype(dtype)
         elem_size = dt.itemsize
 
@@ -805,28 +1102,81 @@ class RKNNRuntime:
 
     def _outputs_get_graph(self):
         results = []
-        dtype = self._graph_user_dtype if hasattr(self, '_graph_user_dtype') else self._graph_dtype
-        dt = np.dtype(dtype)
-        elem_size = dt.itemsize
-        for t in self._output_tensors:
+        for oi, t in enumerate(self._output_tensors):
             buf = t._buf
-            if t.native and len(t.native) >= 5:
+            dt = None
+            rs_t_found = None
+            for n in self.model["nodes"]:
+                if n.op == "Reshape":
+                    d_outs = [x for x in n.outputs if x in self._tensor_bufs]
+                    if d_outs and d_outs[0] == t.idx:
+                        rs_cand = self.model["tensors"][n.inputs[0]] if n.inputs else None
+                        if rs_cand and rs_cand.native and len(rs_cand.native) >= 5:
+                            rs_t_found = rs_cand
+                        break
+            if rs_t_found:
+                c2 = rs_t_found.native[4]
+                if c2 == 8: dt = np.float16
+                elif c2 == 4: dt = np.int32
+                elif c2 == 1: dt = np.int8
+            if dt is None and t.native and len(t.native) >= 5:
+                c2 = t.native[4]
+                if c2 == 8: dt = np.float16
+                elif c2 == 4: dt = np.int32
+                elif c2 == 1: dt = np.int8
+            if dt is None:
+                if hasattr(self, '_graph_user_dtypes') and oi < len(self._graph_user_dtypes):
+                    dt = np.dtype(self._graph_user_dtypes[oi])
+                else:
+                    dt = np.dtype(self._graph_user_dtype if hasattr(self, '_graph_user_dtype') else self._graph_dtype)
+            elem_size = dt.itemsize
+            rs_t = None
+            if hasattr(self, '_rs_bufs'):
+                for rs_name, (rs_buf, _, rs_tensor) in self._rs_bufs.items():
+                    for n in self.model["nodes"]:
+                        if n.op == "Reshape":
+                            data_outs = [x for x in n.outputs if x in self._tensor_bufs]
+                            if data_outs and data_outs[0] == t.idx:
+                                rs_t = self.model["tensors"][n.inputs[0]] if n.inputs else None
+                                break
+                    if rs_t:
+                        break
+            if rs_t and rs_t.native and len(rs_t.native) >= 5:
+                sz = rs_t.size or 4096
+                raw = (ctypes.c_uint8 * sz).from_buffer(rs_t._buf)
+                packed = np.frombuffer(raw, dtype=np.uint8, count=sz).copy()
+                data = _nc1hwc2_to_contiguous(packed, rs_t.native, dt, self._stride_for(rs_t))
+                n_out = int(np.prod(t.logical)) if t.logical else len(data)
+                results.append(data[:n_out].reshape(t.logical) if t.logical else data[:n_out])
+            elif t.native and len(t.native) >= 5:
                 sz = t.size or 4096
                 raw = (ctypes.c_uint8 * sz).from_buffer(buf)
                 packed = np.frombuffer(raw, dtype=np.uint8, count=sz).copy()
                 data = _nc1hwc2_to_contiguous(packed, t.native, dt)
+                results.append(data.reshape(t.logical) if t.logical else data)
             else:
                 n_elems = int(np.prod(t.logical)) if t.logical else 1
                 n_bytes = n_elems * elem_size
                 raw = (ctypes.c_uint8 * n_bytes).from_buffer(buf)
                 data = np.frombuffer(raw, dtype=dt, count=n_elems).copy()
-            results.append(data.reshape(t.logical) if t.logical else data)
+                results.append(data.reshape(t.logical) if t.logical else data)
         return results
 
     def inputs_set(self, input_arrays):
         """Write input data into the model (contiguous → NC1HWC2 + DMA patching)."""
         if self._graph:
             return self._inputs_set_graph(input_arrays)
+
+        arrays = [np.asarray(arr) for arr in input_arrays]
+        user_dtype = arrays[0].dtype if arrays else np.float16
+        self._alu_fallback = user_dtype in (np.int16, np.float32)
+        self._alu_result = None
+
+        if self._alu_fallback:
+            self._alu_input_arrays = [a.ravel() for a in arrays]
+            self._alu_input_shapes = [a.shape for a in arrays]
+            return
+
         # Write raw input data to input buffers
         for i, arr in enumerate(input_arrays):
             if i >= len(self._input_bufs):
@@ -911,6 +1261,17 @@ class RKNNRuntime:
         """Execute the model: NPU submit or CPU fallback."""
         if self._graph:
             return self._run_graph()
+        if self._alu_fallback:
+            ops = [n for n in self.model["nodes"]
+                   if n.op not in ("InputOperator", "OutputOperator", "Reshape")]
+            result = self._alu_input_arrays[0]
+            for op_node in ops:
+                if op_node.op in CPU_KERNELS and len(self._alu_input_arrays) >= 2:
+                    result = CPU_KERNELS[op_node.op]([result, self._alu_input_arrays[1]])
+                elif op_node.op in CPU_KERNELS and len(self._alu_input_arrays) == 1:
+                    result = CPU_KERNELS[op_node.op]([result])
+            self._alu_result = result
+            return
         if self._all_cpu:
             for cpu_node in self._cpu_ops:
                 self._execute_cpu_op(cpu_node)
@@ -1055,6 +1416,9 @@ class RKNNRuntime:
     def outputs_get(self):
         if self._graph:
             return self._outputs_get_graph()
+        if self._alu_fallback and self._alu_result is not None:
+            shape = self._alu_input_shapes[0] if self._alu_input_shapes else None
+            return [self._alu_result.reshape(shape) if shape else self._alu_result]
         results = []
         for i, (buf, mc, tensor) in enumerate(self._output_bufs):
             z_rs = self._get_feature_tensor("z-rs") or self._get_feature_tensor("c-rs")
