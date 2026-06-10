@@ -177,10 +177,18 @@ def make_pc_tail(next_dma_addr, next_body_len):
 
 # ── ADD Operations ───────────────────────────────────────────────────────────
 def npu_add_fp16(dev, a, b):
-    """Element-wise ADD of two fp16 arrays on the NPU. Returns fp16 result."""
+    """Element-wise ADD of two fp16 arrays on the NPU.
+
+    Works for any-rank tensors (1D, 2D, 3D, batched N-D): the DPU EW path is
+    flat over total element count, so the shape is flattened for the hardware
+    and the fp16 result is reshaped back to the input shape.
+    """
     a_fp16 = np.asarray(a, dtype=np.float16)
     b_fp16 = np.asarray(b, dtype=np.float16)
     assert a_fp16.shape == b_fp16.shape
+    out_shape = a_fp16.shape
+    a_fp16 = a_fp16.ravel()
+    b_fp16 = b_fp16.ravel()
     n = a_fp16.size
 
     elem_bytes = 2  # fp16
@@ -220,7 +228,7 @@ def npu_add_fp16(dev, a, b):
     # Submit
     dev.submit(task_mc.obj_addr, task_count=len(tile_regs_list))
 
-    return np.frombuffer(out_map, dtype=np.float16, count=n).copy()
+    return np.frombuffer(out_map, dtype=np.float16, count=n).copy().reshape(out_shape)
 
 
 def cpu_add_int16(a, b):
@@ -282,15 +290,34 @@ def _write_tasks(regs_ptr, tasks_ptr, regcmd_dma, tile_regs_list):
 def test_fp16(dev):
     print("─── fp16 ADD (NPU) ───")
     np.random.seed(42)
-    for n in [1, 8, 16, 100, 1000, 8000, 64000, 131072]:
-        a = np.random.uniform(-10, 10, n).astype(np.float16)
-        b = np.random.uniform(-10, 10, n).astype(np.float16)
+    # Multi-dimensional shapes exercise the NPU EW path at various sizes,
+    # including the large 1024x1024 (1,048,576 elems, multi-tiled) case and a
+    # batched N=3 of 10x10x10 tensor. The DPU EW path is flat over element
+    # count, so the result must come back matching the input shape.
+    shapes = [
+        (1,),
+        (8,),
+        (16,),
+        (10, 10),          # 100
+        (1000,),
+        (8000,),
+        (64000,),          # exactly one tile
+        (131072,),         # multi-tile
+        (3, 10, 10, 10),   # N=3 batch of 10x10x10 = 3000 elems
+        (1024, 1024),      # 1,048,576 elems, ~17 tiles
+    ]
+    for shape in shapes:
+        n = int(np.prod(shape))
+        a = np.random.uniform(-10, 10, n).astype(np.float16).reshape(shape)
+        b = np.random.uniform(-10, 10, n).astype(np.float16).reshape(shape)
         got = npu_add_fp16(dev, a, b)
         want = (a.astype(np.float32) + b.astype(np.float32)).astype(np.float16)
+        assert got.shape == shape, f"shape mismatch: got {got.shape}, want {shape}"
         md = float(np.max(np.abs(got.astype(np.float32) - want.astype(np.float32))))
         ok = np.allclose(got, want, atol=0.1)
-        print(f"  n={n:7d}  max_diff={md:.6f}  {'PASS' if ok else 'FAIL'}")
-        assert ok, f"fp16 n={n} FAILED"
+        label = f"{shape!s:>18}  n={n:8d}"
+        print(f"  {label}  max_diff={md:.6f}  {'PASS' if ok else 'FAIL'}")
+        assert ok, f"fp16 shape={shape} FAILED"
 
 def test_int16():
     print("─── int16 ADD (CPU fallback — NPU DPU EW is fp16-only) ───")

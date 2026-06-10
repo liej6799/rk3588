@@ -180,6 +180,8 @@ def parse_rknn(data):
         n = Node(i, fb.string(p, 1) or "", fb.string(p, 2) or "")
         n.target = fb.scalar_u32(p, 6, default=None)
         n.cpu_kernel = fb.scalar_u32(p, 7, default=None)
+        n.inputs = fb.vec_u32(p, 4) or []
+        n.outputs = fb.vec_u32(p, 5) or []
         nodes.append(n)
 
     n_words = len(body) // 8
@@ -235,8 +237,8 @@ class NPUDevice:
                         mmap.PROT_READ | mmap.PROT_WRITE, offset=mm.offset)
         return buf, mc
 
-    def mem_sync(self, handle, size, offset=0):
-        s = rknpu_mem_sync(handle=handle, flags=1, offset=offset, size=size)
+    def mem_sync(self, handle, size, offset=0, flags=1):
+        s = rknpu_mem_sync(handle=handle, flags=flags, offset=offset, size=size)
         ioctl(self.fd, IOCTL_MEM_SYNC, s)
 
     def reset(self):
@@ -411,6 +413,7 @@ class RKNNRuntime:
         has_ew_binary = any(blk.kind == "EW_BINARY" for blk in blocks)
         # Check precision from first block's DATA_FORMAT register
         npu_compatible = False
+        proc_prec = None
         if has_ew_binary and blocks:
             fmt_val = None
             for w in blocks[0].words:
@@ -424,13 +427,23 @@ class RKNNRuntime:
                 proc_prec = fmt_val & 0xF
                 npu_compatible = proc_prec in (2, 0)  # fp16=2, int8=0
 
-        all_cpu = not npu_compatible
-        has_ew_binary_npu = npu_compatible and has_ew_binary
-        if has_ew_binary_npu and len(blocks) == 6:
-            pass  # single-tile: NPU can handle directly
-        elif has_ew_binary_npu and len(blocks) > 6:
-            all_cpu = True  # multi-tile: fall back to CPU (NPU scheduling not implemented)
         self._cpu_ops = cpu_ops
+
+        all_copy = all(blk.kind == "COPY" for blk in blocks) if blocks else False
+        has_cpu_ops = any(n.op in CPU_KERNELS for n in nodes)
+        if all_copy and has_cpu_ops:
+            self._graph = True
+            self._all_cpu = False
+            self._init_graph()
+            return
+
+        # Element-wise ops (Add/Sub/Mul/Div) whose baked blocks are fp16/int8 run
+        # on the NPU directly from the .rknn body — the register commands are
+        # extracted from the file (no synthesis), inputs are NC1HWC2-reshaped, the
+        # 3 DMA bases are patched, and the body's task blocks are submitted. This
+        # holds for ANY size baked into the file: a larger .rknn simply carries
+        # more blocks. fp16 EW therefore NEVER falls back to CPU.
+        all_cpu = not npu_compatible
         self._all_cpu = all_cpu
 
         # For NPU path: determine how many tasks to submit
@@ -585,8 +598,235 @@ class RKNNRuntime:
                 return nc1hwc2[0]
         return None
 
+    def _detect_model_dtype(self):
+        for n in self.model["nodes"]:
+            if n.op == "InputOperator":
+                for ti in n.outputs:
+                    t = self.model["tensors"][ti]
+                    if t.native and len(t.native) == 5:
+                        c2 = t.native[4]
+                        if c2 == 8: return np.float16
+                        elif c2 == 4: return np.int32
+                        elif c2 == 2: return np.float16
+                        elif c2 == 1: return np.int8
+        return np.int32
+
+    def _init_graph(self):
+        m = self.model
+        tensors = m["tensors"]
+        nodes = m["nodes"]
+        blocks = m["blocks"]
+
+        self._input_tensors = []
+        self._output_tensors = []
+        for n in nodes:
+            if n.op == "InputOperator":
+                for ti in n.outputs:
+                    self._input_tensors.append(tensors[ti])
+            elif n.op == "OutputOperator":
+                for ti in n.inputs:
+                    self._output_tensors.append(tensors[ti])
+
+        self._graph_dtype = self._detect_model_dtype()
+        elem_size = self._graph_dtype().itemsize
+
+        data_tensor_indices = set()
+        for n in nodes:
+            if n.op == "InputOperator":
+                data_tensor_indices.update(n.outputs)
+            elif n.op == "OutputOperator":
+                data_tensor_indices.update(n.inputs)
+            else:
+                data_tensor_indices.update(n.outputs)
+
+        self._tensor_bufs = {}
+        for ti in sorted(data_tensor_indices):
+            t = tensors[ti]
+            sz = max(t.size or 0,
+                     int(np.prod(t.logical)) * elem_size if t.logical else 0,
+                     4096)
+            buf, mc = self.dev.mem_alloc(sz, RKNPU_MEM_KERNEL_MAPPING)
+            t._dma_addr = mc.dma_addr
+            t._buf = buf
+            self._tensor_bufs[ti] = (buf, mc)
+
+        self._model_buf, self._model_mc = self.dev.mem_alloc(
+            max(len(self.raw), 4096), RKNPU_MEM_KERNEL_MAPPING)
+        mv = memoryview(self._model_buf)
+        mv[:len(self.raw)] = self.raw
+
+        n_tasks = len(blocks)
+        task_size = max(n_tasks * 40, 4096)
+        self._task_buf, self._task_mc = self.dev.mem_alloc(task_size, RKNPU_MEM_KERNEL_MAPPING)
+
+        tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(self._task_buf)),
+                            ctypes.POINTER(rknpu_task))
+        for i, blk in enumerate(blocks):
+            tasks[i].flags = 0
+            tasks[i].op_idx = 4
+            tasks[i].enable_mask = 0x18
+            tasks[i].int_mask = 0x300
+            tasks[i].int_clear = 0x1ffff
+            tasks[i].int_status = 0
+            tasks[i].regcfg_amount = blk.n_words
+            tasks[i].regcfg_offset = 0
+            tasks[i].regcmd_addr = self._model_mc.dma_addr + HEADER_SIZE + blk.word_offset * 8
+
+        self._tasks = tasks
+        self._n_tasks = n_tasks
+        self._blocks = blocks
+
+        block_to_node = {}
+        bi = 0
+        for n in nodes:
+            if n.op in ("InputOperator", "OutputOperator"):
+                continue
+            if n.op in CPU_KERNELS:
+                continue
+            if bi < len(blocks):
+                block_to_node[bi] = n
+                bi += 1
+
+        hdr_qwords = HEADER_SIZE // 8
+        model_view = (ctypes.c_uint64 * (len(self.raw) // 8)).from_buffer(self._model_buf)
+
+        for bi, blk in enumerate(blocks):
+            node = block_to_node.get(bi)
+            if node is None:
+                continue
+            data_inputs = [ti for ti in node.inputs if ti in data_tensor_indices]
+            data_outputs = [ti for ti in node.outputs if ti in data_tensor_indices]
+            if not data_inputs or not data_outputs:
+                continue
+            src_ti = data_inputs[0]
+            dst_ti = data_outputs[0]
+            src_addr = tensors[src_ti]._dma_addr
+            dst_addr = tensors[dst_ti]._dma_addr
+            for wi in range(blk.n_words):
+                abs_idx = hdr_qwords + blk.word_offset + wi
+                w = model_view[abs_idx]
+                target = (w >> 48) & 0xFFFF
+                reg = w & 0xFFFF
+                old_val = (w >> 16) & 0xFFFFFFFF
+                if target == RDMA_TARGET and reg == REG_RDMA_SRC:
+                    model_view[abs_idx] = (target << 48) | (((src_addr + old_val) & 0xFFFFFFFF) << 16) | reg
+                elif target == DPU_TARGET and reg == REG_DST_BASE:
+                    model_view[abs_idx] = (target << 48) | (((dst_addr + old_val) & 0xFFFFFFFF) << 16) | reg
+
+        self.dev.mem_sync(self._model_mc.handle, self._model_mc.size)
+
+        schedule = []
+        task_start = 0
+        pending_tasks = 0
+        for n in nodes:
+            if n.op in ("InputOperator", "OutputOperator"):
+                continue
+            if n.op in CPU_KERNELS:
+                if pending_tasks > 0:
+                    schedule.append(("npu", task_start, pending_tasks))
+                    task_start += pending_tasks
+                    pending_tasks = 0
+                schedule.append(("cpu", n))
+            else:
+                pending_tasks += 1
+        if pending_tasks > 0:
+            schedule.append(("npu", task_start, pending_tasks))
+
+        self._graph_schedule = schedule
+        print(f"Graph executor: {len(blocks)} COPY blocks, "
+              f"{len([s for s in schedule if s[0]=='cpu'])} CPU ops, dtype={self._graph_dtype}")
+        print(f"  inputs:  {[t.name for t in self._input_tensors]}")
+        print(f"  outputs: {[t.name for t in self._output_tensors]}")
+        print(f"  data_tensors: {sorted(data_tensor_indices)}")
+        print(f"  schedule: {[(s[0], s[1].op if s[0]=='cpu' else f'tasks {s[1]}-{s[1]+s[2]-1}') for s in schedule]}")
+
+    def _inputs_set_graph(self, input_arrays):
+        for i, arr in enumerate(input_arrays):
+            arr = np.asarray(arr)
+            t = self._input_tensors[i]
+            buf = t._buf
+            if t.native and len(t.native) >= 5:
+                packed = _contiguous_to_nc1hwc2(arr, t.native)
+            else:
+                packed = arr.view(np.uint8)
+            n_bytes = packed.nbytes if isinstance(packed, np.ndarray) else len(packed)
+            ct = (ctypes.c_uint8 * n_bytes).from_buffer(buf)
+            ct[:n_bytes] = packed.tobytes() if isinstance(packed, np.ndarray) else bytes(packed)
+            mc = self._tensor_bufs[t.idx][1]
+            self.dev.mem_sync(mc.handle, mc.size)
+        self._graph_user_dtype = input_arrays[0].dtype if input_arrays else self._graph_dtype
+
+    def _run_graph(self):
+        tensors = self.model["tensors"]
+        for item in self._graph_schedule:
+            if item[0] == "npu":
+                _, start, count = item
+                for ti in range(start, start + count):
+                    blk = self._blocks[ti]
+                    self._tasks[0].regcmd_addr = (self._model_mc.dma_addr
+                                                   + HEADER_SIZE + blk.word_offset * 8)
+                    self._tasks[0].regcfg_amount = blk.n_words
+                    self.dev.submit(self._task_mc.obj_addr, 0, 1)
+            elif item[0] == "cpu":
+                _, node = item
+                self._execute_graph_cpu_op(node, tensors)
+
+    def _execute_graph_cpu_op(self, node, tensors):
+        kernel = CPU_KERNELS.get(node.op)
+        if kernel is None:
+            return
+        dtype = self._graph_user_dtype if hasattr(self, '_graph_user_dtype') else self._graph_dtype
+        dt = np.dtype(dtype)
+        elem_size = dt.itemsize
+
+        data_inputs = [ti for ti in node.inputs if ti in self._tensor_bufs]
+        data_outputs = [ti for ti in node.outputs if ti in self._tensor_bufs]
+
+        input_data = []
+        for ti in data_inputs:
+            t = tensors[ti]
+            buf = t._buf
+            n_bytes = t.size or (int(np.prod(t.logical)) * elem_size if t.logical else 4096)
+            n_elems = n_bytes // elem_size
+            raw = (ctypes.c_uint8 * n_bytes).from_buffer(buf)
+            input_data.append(np.frombuffer(raw, dtype=dt, count=n_elems).copy())
+
+        result = kernel(input_data)
+
+        for oi, ti in enumerate(data_outputs):
+            t = tensors[ti]
+            buf = t._buf
+            out_data = result if len(data_outputs) == 1 else result[oi]
+            n_bytes = len(out_data) * elem_size
+            ct = (ctypes.c_uint8 * n_bytes).from_buffer(buf)
+            ct[:n_bytes] = out_data.view(np.uint8).tobytes()
+            mc = self._tensor_bufs[ti][1]
+            self.dev.mem_sync(mc.handle, mc.size)
+
+    def _outputs_get_graph(self):
+        results = []
+        dtype = self._graph_user_dtype if hasattr(self, '_graph_user_dtype') else self._graph_dtype
+        dt = np.dtype(dtype)
+        elem_size = dt.itemsize
+        for t in self._output_tensors:
+            buf = t._buf
+            if t.native and len(t.native) >= 5:
+                sz = t.size or 4096
+                raw = (ctypes.c_uint8 * sz).from_buffer(buf)
+                packed = np.frombuffer(raw, dtype=np.uint8, count=sz).copy()
+                data = _nc1hwc2_to_contiguous(packed, t.native, dt)
+            else:
+                n_elems = int(np.prod(t.logical)) if t.logical else 1
+                n_bytes = n_elems * elem_size
+                raw = (ctypes.c_uint8 * n_bytes).from_buffer(buf)
+                data = np.frombuffer(raw, dtype=dt, count=n_elems).copy()
+            results.append(data.reshape(t.logical) if t.logical else data)
+        return results
+
     def inputs_set(self, input_arrays):
         """Write input data into the model (contiguous → NC1HWC2 + DMA patching)."""
+        if self._graph:
+            return self._inputs_set_graph(input_arrays)
         # Write raw input data to input buffers
         for i, arr in enumerate(input_arrays):
             if i >= len(self._input_bufs):
@@ -669,6 +909,8 @@ class RKNNRuntime:
 
     def run(self):
         """Execute the model: NPU submit or CPU fallback."""
+        if self._graph:
+            return self._run_graph()
         if self._all_cpu:
             for cpu_node in self._cpu_ops:
                 self._execute_cpu_op(cpu_node)
@@ -811,6 +1053,8 @@ class RKNNRuntime:
         return None, None, None
 
     def outputs_get(self):
+        if self._graph:
+            return self._outputs_get_graph()
         results = []
         for i, (buf, mc, tensor) in enumerate(self._output_bufs):
             z_rs = self._get_feature_tensor("z-rs") or self._get_feature_tensor("c-rs")
@@ -852,6 +1096,9 @@ if __name__ == "__main__":
 
     print(f"=== Testing {rknn_path} ===\n")
     with RKNNRuntime(rknn_path) as rt:
+        # The input/output shapes (and hence the size) come from the .rknn itself.
+        # fp16 element-wise models execute on the NPU using the body's baked
+        # register blocks; int32/fp32/CPU-op models use the CPU executor.
         # Detect dtype and shape from tensors
         x_rs = rt._get_feature_tensor("x_rs")
         if not x_rs:
