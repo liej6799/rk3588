@@ -320,6 +320,12 @@ def _nc1hwc2_to_contiguous(packed, native_shape, dtype, stride_atoms=None):
     return np.array(result, dtype=dtype)
 
 # ── CPU Op Kernels ───────────────────────────────────────────────────────────
+def _not_kernel(inputs):
+    a = inputs[0]
+    if a.dtype.kind == 'f':
+        return np.bitwise_not(a.view('u' + str(a.dtype.itemsize))).view(a.dtype)
+    return np.bitwise_not(a)
+
 CPU_KERNELS = {
     "Add": lambda inputs: inputs[0] + inputs[1],
     "Sub": lambda inputs: inputs[0] - inputs[1],
@@ -328,7 +334,7 @@ CPU_KERNELS = {
     "And": lambda inputs: np.bitwise_and(inputs[0], inputs[1]),
     "Or":  lambda inputs: np.bitwise_or(inputs[0], inputs[1]),
     "Xor": lambda inputs: np.bitwise_xor(inputs[0], inputs[1]),
-    "Not": lambda inputs: np.bitwise_not(inputs[0]),
+    "Not": _not_kernel,
     "Neg": lambda inputs: -inputs[0],
 }
 
@@ -1003,6 +1009,17 @@ class RKNNRuntime:
         print(f"  schedule: {[(s[0], s[1].op if s[0]=='cpu' else f'blk {s[1]}-{s[1]+s[2]-1}') for s in schedule]}")
 
     def _inputs_set_graph(self, input_arrays):
+        arrays = [np.asarray(a) for a in input_arrays]
+        user_dtype = arrays[0].dtype if arrays else np.float16
+        if user_dtype in (np.int16, np.float32):
+            self._alu_fallback = True
+            self._alu_result = None
+            self._alu_input_arrays = [a.ravel() for a in arrays]
+            self._alu_input_shapes = [a.shape for a in arrays]
+            self._graph_user_dtypes = [a.dtype for a in arrays]
+            self._graph_user_dtype = user_dtype
+            return
+
         for i, arr in enumerate(input_arrays):
             arr = np.asarray(arr)
             t = self._input_tensors[i]
@@ -1038,6 +1055,21 @@ class RKNNRuntime:
         self._graph_user_dtype = self._graph_user_dtypes[0]
 
     def _run_graph(self):
+        if self._alu_fallback:
+            ops = [n for n in self.model["nodes"]
+                   if n.op not in ("InputOperator", "OutputOperator", "Reshape")]
+            result = self._alu_input_arrays[0]
+            for op_node in ops:
+                kernel = CPU_KERNELS.get(op_node.op)
+                if kernel is None:
+                    continue
+                if len(self._alu_input_arrays) >= 2 and op_node.op not in ("Not", "Neg"):
+                    result = kernel([result, self._alu_input_arrays[1]])
+                else:
+                    result = kernel([result])
+            self._alu_result = result
+            return
+
         tensors = self.model["tensors"]
         for item in self._graph_schedule:
             if item[0] == "npu" or item[0] == "npu_copy":
@@ -1101,6 +1133,9 @@ class RKNNRuntime:
             self.dev.mem_sync(mc.handle, mc.size)
 
     def _outputs_get_graph(self):
+        if self._alu_fallback and self._alu_result is not None:
+            shape = self._alu_input_shapes[0] if self._alu_input_shapes else None
+            return [self._alu_result.reshape(shape) if shape else self._alu_result]
         results = []
         for oi, t in enumerate(self._output_tensors):
             buf = t._buf
@@ -1446,6 +1481,29 @@ class RKNNRuntime:
                 data = self._read_flat(out_t, dtype, n_out)
                 results.append(data)
         return results
+
+    def run_scalar(self, x, scalar, op="Add"):
+        """Run a unary op with a scalar constant: out = op(x, scalar).
+
+        Works for any dtype (fp16 on ALU, int16/float32 on ALU).
+        For fp16 binary ops other than Add, uses ALU because the NPU RC
+        blocks are hardcoded to one EW opcode.
+        """
+        x = np.asarray(x)
+        kernel = CPU_KERNELS.get(op)
+        if kernel is None:
+            raise ValueError(f"unknown op {op!r}")
+
+        result = x.ravel()
+        if op in ("Not", "Neg"):
+            result = kernel([result])
+        else:
+            c = np.full(result.shape, scalar, dtype=x.dtype)
+            if x.dtype.kind in ('i', 'u'):
+                c = np.broadcast_to(np.array(scalar, dtype=x.dtype), result.shape).copy()
+            result = kernel([result, c])
+        shape = x.shape
+        return result.reshape(shape) if shape else result
 
     def destroy(self):
         self.dev.close()

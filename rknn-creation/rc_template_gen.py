@@ -105,11 +105,11 @@ CPU_OP_SPECS = {
     "And": (85, True),
     "Or":  (86, True),
     "Not": (78, True),
+    "Neg": (79, False),
 }
 CPU_OP_ENUMS = {name: val for name, (val, _verified) in CPU_OP_SPECS.items()}
 
-# Ops that take a single input (unary).  Everything else in CPU_OP_SPECS is binary.
-CPU_UNARY_OPS = {"Not"}
+CPU_UNARY_OPS = {"Not", "Neg"}
 
 
 def is_unary_cpu_op(name):
